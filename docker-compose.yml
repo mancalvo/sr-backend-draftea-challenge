@@ -1,0 +1,176 @@
+services:
+  # ---- Infrastructure ----
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-draftea}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-draftea}
+      POSTGRES_DB: ${POSTGRES_DB:-draftea}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-draftea}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  traefik:
+    image: traefik:v3.1
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./deploy/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    depends_on:
+      saga-orchestrator:
+        condition: service_healthy
+      payments:
+        condition: service_healthy
+      wallets:
+        condition: service_healthy
+      catalog-access:
+        condition: service_healthy
+
+  # ---- Application services ----
+
+  saga-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: saga-orchestrator
+    environment:
+      SAGA_ORCHESTRATOR_PORT: "8081"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-draftea}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-draftea}
+      POSTGRES_DB: ${POSTGRES_DB:-draftea}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      CATALOG_ACCESS_URL: http://catalog-access:8084
+      PAYMENTS_URL: http://payments:8082
+      SAGA_TIMEOUT: 30s
+      TIMEOUT_POLL_INTERVAL: 5s
+      SYNC_HTTP_TIMEOUT: 2s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  payments:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: payments
+    environment:
+      PAYMENTS_PORT: "8082"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-draftea}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-draftea}
+      POSTGRES_DB: ${POSTGRES_DB:-draftea}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      PROVIDER_CHARGE_TIMEOUT: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  wallets:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: wallets
+    environment:
+      WALLETS_PORT: "8083"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-draftea}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-draftea}
+      POSTGRES_DB: ${POSTGRES_DB:-draftea}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8083/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  catalog-access:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: catalog-access
+    environment:
+      CATALOG_ACCESS_PORT: "8084"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-draftea}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-draftea}
+      POSTGRES_DB: ${POSTGRES_DB:-draftea}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8084/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  pg_data:

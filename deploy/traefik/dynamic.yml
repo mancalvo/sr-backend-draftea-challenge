@@ -1,0 +1,51 @@
+# Traefik dynamic configuration – routing rules
+http:
+  routers:
+    # Command routes -> saga-orchestrator
+    commands:
+      rule: "PathPrefix(`/deposits`) || PathPrefix(`/purchases`) || PathPrefix(`/refunds`)"
+      entryPoints:
+        - web
+      service: saga-orchestrator
+
+    # Transaction reads -> payments
+    transactions:
+      rule: "PathPrefix(`/transactions`)"
+      entryPoints:
+        - web
+      service: payments
+
+    # Wallet reads -> wallets
+    wallets:
+      rule: "PathPrefix(`/wallets`)"
+      entryPoints:
+        - web
+      service: wallets
+
+    # Entitlement reads -> catalog-access
+    entitlements:
+      rule: "PathPrefix(`/users`)"
+      entryPoints:
+        - web
+      service: catalog-access
+
+  services:
+    saga-orchestrator:
+      loadBalancer:
+        servers:
+          - url: "http://saga-orchestrator:8081"
+
+    payments:
+      loadBalancer:
+        servers:
+          - url: "http://payments:8082"
+
+    wallets:
+      loadBalancer:
+        servers:
+          - url: "http://wallets:8083"
+
+    catalog-access:
+      loadBalancer:
+        servers:
+          - url: "http://catalog-access:8084"

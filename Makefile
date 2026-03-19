@@ -1,5 +1,5 @@
 .PHONY: build test test-platform test-messaging test-catalog-access test-payments test-wallets test-saga test-deposit-flow test-purchase-flow test-refund-flow vet fmt check clean \
-       check-migrations migrate-up migrate-down migrate-create
+       check-migrations migrate-up migrate-down migrate-create check-compose
 
 SERVICES     := api-gateway saga-orchestrator payments wallets catalog-access
 BIN_DIR      := bin
@@ -104,3 +104,22 @@ migrate-down:
 ## migrate-create: create a new migration pair (usage: make migrate-create NAME=create_foo)
 migrate-create:
 	migrate create -ext sql -dir $(MIGRATIONS) -seq $(NAME)
+
+## ---- Docker Compose ----
+
+## check-compose: validate docker-compose.yml configuration
+check-compose:
+	@echo "validating docker-compose.yml..."
+	docker compose config -q
+	@echo "docker-compose config OK"
+	@echo "checking required services..."
+	@for svc in postgres rabbitmq traefik saga-orchestrator payments wallets catalog-access; do \
+		docker compose config --services | grep -q "^$$svc$$" || \
+		{ echo "ERROR: missing service $$svc"; exit 1; }; \
+	done
+	@echo "  all required services present"
+	@echo "checking Traefik config files..."
+	@test -f deploy/traefik/traefik.yml || { echo "ERROR: deploy/traefik/traefik.yml not found"; exit 1; }
+	@test -f deploy/traefik/dynamic.yml || { echo "ERROR: deploy/traefik/dynamic.yml not found"; exit 1; }
+	@echo "  Traefik config files OK"
+	@echo "check-compose passed"
