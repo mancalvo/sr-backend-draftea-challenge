@@ -1,4 +1,4 @@
-.PHONY: build test test-platform test-messaging test-catalog-access test-payments test-wallets test-saga test-deposit-flow test-purchase-flow test-refund-flow vet fmt check clean \
+.PHONY: build test test-platform test-messaging test-catalog-access test-payments test-wallets test-saga test-deposit-flow test-purchase-flow test-refund-flow test-observability vet fmt check clean \
        check-migrations migrate-up migrate-down migrate-create check-compose
 
 SERVICES     := api-gateway saga-orchestrator payments wallets catalog-access
@@ -53,6 +53,10 @@ test-purchase-flow:
 ## test-refund-flow: run refund workflow tests
 test-refund-flow:
 	go test -run TestRefundFlow ./internal/services/saga/...
+
+## test-observability: run observability baseline checks (health, logging, broker logs)
+test-observability:
+	go test ./test/observability/... ./internal/platform/health/... ./internal/platform/logging/...
 
 ## vet: run go vet
 vet:

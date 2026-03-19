@@ -14,6 +14,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/config"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/health"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/rabbitmq"
@@ -72,8 +73,11 @@ func main() {
 	httpHandler := wallets.NewHandler(repo, logger)
 	amqpHandler := wallets.NewConsumerHandler(repo, publisher, logger)
 
-	// HTTP server
-	router := wallets.NewRouter(httpHandler, logger)
+	// HTTP server with readiness checks
+	router := wallets.NewRouter(httpHandler, logger,
+		&health.DBPinger{Pinger: db},
+		&health.RabbitMQChecker{Conn: rmqConn},
+	)
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
 		Handler:      router,

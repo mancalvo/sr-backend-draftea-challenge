@@ -13,6 +13,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/config"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/health"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/rabbitmq"
@@ -89,8 +90,11 @@ func main() {
 		SagaTimeout:  sagaTimeout,
 	}, logger)
 
-	// HTTP server
-	router := saga.NewRouter(httpHandler, logger)
+	// HTTP server with readiness checks
+	router := saga.NewRouter(httpHandler, logger,
+		&health.DBPinger{Pinger: db},
+		&health.RabbitMQChecker{Conn: rmqConn},
+	)
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
 		Handler:      router,

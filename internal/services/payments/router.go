@@ -13,7 +13,8 @@ import (
 const serviceName = "payments"
 
 // NewRouter creates the HTTP router for the payments service.
-func NewRouter(handler *Handler, logger *slog.Logger) http.Handler {
+// Optional health.Checker values are probed by the /health endpoint.
+func NewRouter(handler *Handler, logger *slog.Logger, checkers ...health.Checker) http.Handler {
 	r := chi.NewRouter()
 
 	// Middleware
@@ -21,7 +22,7 @@ func NewRouter(handler *Handler, logger *slog.Logger) http.Handler {
 	r.Use(httpx.Recoverer)
 
 	// Health check
-	r.Get("/health", health.Handler(serviceName))
+	r.Get("/health", health.Handler(serviceName, checkers...))
 
 	// Public endpoints
 	r.Get("/transactions/{transaction_id}", handler.GetTransaction)
