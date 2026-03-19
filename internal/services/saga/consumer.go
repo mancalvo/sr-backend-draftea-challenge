@@ -100,6 +100,15 @@ func decodeRefundPayload(s *SagaInstance) (*RefundPayload, error) {
 	return &p, nil
 }
 
+// decodeDepositPayload extracts DepositPayload from a saga's stored payload.
+func decodeDepositPayload(s *SagaInstance) (*DepositPayload, error) {
+	var p DepositPayload
+	if err := json.Unmarshal(s.Payload, &p); err != nil {
+		return nil, fmt.Errorf("decode deposit payload: %w", err)
+	}
+	return &p, nil
+}
+
 // isSagaTerminal returns true if the saga is already in a terminal state
 // (completed, failed, reconciliation_required). Used to handle duplicate
 // event redelivery gracefully.
@@ -244,6 +253,28 @@ func (c *ConsumerHandler) handleWalletCredited(ctx context.Context, env messagin
 		}
 
 		logger.Info("purchase saga completed with compensation", "saga_id", s.ID)
+		return nil
+	}
+
+	// For deposit sagas: credit completes the deposit successfully.
+	// Valid from both running (normal flow) and timed_out (late provider success).
+	if s.Type == SagaTypeDeposit && (s.Status == StatusRunning || s.Status == StatusTimedOut) {
+		outcome := OutcomeSucceeded
+		step := "deposit_completed"
+		if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusCompleted, &outcome, &step); err != nil {
+			if errors.Is(err, ErrIllegalTransition) {
+				logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
+				return nil
+			}
+			return fmt.Errorf("update saga to completed (deposit): %w", err)
+		}
+
+		if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil); err != nil {
+			logger.Error("failed to update transaction to completed", "error", err)
+			return fmt.Errorf("update transaction status to completed: %w", err)
+		}
+
+		logger.Info("deposit saga completed successfully", "saga_id", s.ID)
 		return nil
 	}
 
@@ -490,12 +521,55 @@ func (c *ConsumerHandler) handleProviderChargeSucceeded(ctx context.Context, env
 	}
 	logger = logger.With(slog.String(logging.KeyTransactionID, payload.TransactionID))
 
-	saga, err := c.lookupSaga(ctx, payload.TransactionID, logger)
+	s, err := c.lookupSaga(ctx, payload.TransactionID, logger)
 	if err != nil {
 		return err
 	}
 
-	logger.Info("received provider.charge.succeeded", "saga_id", saga.ID, "provider_ref", payload.ProviderRef)
+	logger.Info("received provider.charge.succeeded", "saga_id", s.ID, "saga_status", string(s.Status), "provider_ref", payload.ProviderRef)
+
+	// Idempotent: already terminal, nothing to do.
+	if isSagaTerminal(s) {
+		logger.Info("saga already terminal, ignoring duplicate provider.charge.succeeded")
+		return nil
+	}
+
+	if s.Type != SagaTypeDeposit {
+		return nil
+	}
+
+	depositPayload, err := decodeDepositPayload(s)
+	if err != nil {
+		return err
+	}
+
+	// Provider charge succeeded -> publish wallet.credit.requested.
+	// For timed_out sagas, a late success can still legally complete the deposit.
+	step := "deposit_credit"
+	if s.Status == StatusTimedOut {
+		// Resume from timed_out: transition back to running is not legal,
+		// so we go directly to completed after the credit arrives.
+		// For now, just publish the credit command; the wallet.credited handler
+		// will complete the saga.
+		logger.Info("late provider success on timed_out saga, publishing wallet credit", "saga_id", s.ID)
+	}
+
+	if err := c.publisher.Publish(ctx,
+		messaging.ExchangeCommands,
+		messaging.RoutingKeyWalletCreditRequested,
+		s.TransactionID,
+		messaging.WalletCreditRequested{
+			TransactionID: s.TransactionID,
+			UserID:        depositPayload.UserID,
+			Amount:        depositPayload.Amount,
+			Currency:      depositPayload.Currency,
+			SourceStep:    step,
+		},
+	); err != nil {
+		return fmt.Errorf("publish wallet.credit.requested for deposit: %w", err)
+	}
+
+	logger.Info("published wallet.credit.requested for deposit", "saga_id", s.ID)
 	return nil
 }
 
@@ -506,11 +580,41 @@ func (c *ConsumerHandler) handleProviderChargeFailed(ctx context.Context, env me
 	}
 	logger = logger.With(slog.String(logging.KeyTransactionID, payload.TransactionID))
 
-	saga, err := c.lookupSaga(ctx, payload.TransactionID, logger)
+	s, err := c.lookupSaga(ctx, payload.TransactionID, logger)
 	if err != nil {
 		return err
 	}
 
-	logger.Info("received provider.charge.failed", "saga_id", saga.ID, "reason", payload.Reason)
+	logger.Info("received provider.charge.failed", "saga_id", s.ID, "saga_status", string(s.Status), "reason", payload.Reason)
+
+	// Idempotent: already terminal, nothing to do.
+	if isSagaTerminal(s) {
+		logger.Info("saga already terminal, ignoring duplicate provider.charge.failed")
+		return nil
+	}
+
+	if s.Type != SagaTypeDeposit {
+		return nil
+	}
+
+	// Provider charge failed -> fail the saga and the transaction.
+	// This is valid from both running and timed_out statuses.
+	outcome := OutcomeFailed
+	step := "deposit_charge_failed"
+	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusFailed, &outcome, &step); err != nil {
+		if errors.Is(err, ErrIllegalTransition) {
+			logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
+			return nil
+		}
+		return fmt.Errorf("update saga to failed: %w", err)
+	}
+
+	reason := fmt.Sprintf("provider charge failed: %s", payload.Reason)
+	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason); err != nil {
+		logger.Error("failed to update transaction to failed", "error", err)
+		return fmt.Errorf("update transaction status to failed: %w", err)
+	}
+
+	logger.Info("deposit saga failed due to provider charge failure", "saga_id", s.ID)
 	return nil
 }

@@ -1041,3 +1041,377 @@ func TestRefundFlow_RetryPathFinalStatusUpdateFails(t *testing.T) {
 		t.Errorf("saga outcome = %v, want succeeded", final.Outcome)
 	}
 }
+
+// ---- Deposit flow helpers ----
+
+// createDepositSaga sets up a deposit saga in the given repo at the specified status/step.
+func createDepositSaga(t *testing.T, repo *MemoryRepository, transactionID string, status SagaStatus, step *string) *SagaInstance {
+	t.Helper()
+	payload, _ := json.Marshal(DepositPayload{
+		UserID:   "user-1",
+		Amount:   10000,
+		Currency: "ARS",
+	})
+	timeout := time.Now().UTC().Add(30 * time.Second)
+	s, err := repo.CreateSaga(context.Background(), &SagaInstance{
+		TransactionID: transactionID,
+		Type:          SagaTypeDeposit,
+		Status:        StatusCreated,
+		Payload:       payload,
+		TimeoutAt:     &timeout,
+	})
+	if err != nil {
+		t.Fatalf("create saga: %v", err)
+	}
+
+	// Advance to target status if needed.
+	if status != StatusCreated {
+		s, err = repo.UpdateSagaStatus(context.Background(), s.ID, StatusRunning, nil, step)
+		if err != nil {
+			t.Fatalf("transition to running: %v", err)
+		}
+		if status != StatusRunning {
+			s, err = repo.UpdateSagaStatus(context.Background(), s.ID, status, nil, step)
+			if err != nil {
+				t.Fatalf("transition to %s: %v", status, err)
+			}
+		}
+	}
+	return s
+}
+
+// ---- Deposit flow tests ----
+
+func TestDepositFlow_HappyPath(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &recordingPaymentsClient{}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-deposit-happy"
+	step := "deposit_charge"
+	s := createDepositSaga(t, repo, txnID, StatusRunning, &step)
+
+	// Step 1: provider.charge.succeeded -> should publish wallet.credit.requested.
+	env := newTestEnvelope(t, messaging.RoutingKeyProviderChargeSucceeded, txnID, messaging.ProviderChargeSucceeded{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        10000,
+		ProviderRef:   "sim-" + txnID,
+	})
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("handleProviderChargeSucceeded: %v", err)
+	}
+
+	// Verify wallet.credit.requested was published.
+	msgs := pub.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 published message, got %d", len(msgs))
+	}
+	if msgs[0].RoutingKey != messaging.RoutingKeyWalletCreditRequested {
+		t.Errorf("routing key = %s, want %s", msgs[0].RoutingKey, messaging.RoutingKeyWalletCreditRequested)
+	}
+	if msgs[0].Exchange != messaging.ExchangeCommands {
+		t.Errorf("exchange = %s, want %s", msgs[0].Exchange, messaging.ExchangeCommands)
+	}
+
+	creditPayload, ok := msgs[0].Payload.(messaging.WalletCreditRequested)
+	if !ok {
+		t.Fatalf("expected WalletCreditRequested payload, got %T", msgs[0].Payload)
+	}
+	if creditPayload.TransactionID != txnID {
+		t.Errorf("credit transaction_id = %s, want %s", creditPayload.TransactionID, txnID)
+	}
+	if creditPayload.UserID != "user-1" {
+		t.Errorf("credit user_id = %s, want user-1", creditPayload.UserID)
+	}
+	if creditPayload.Amount != 10000 {
+		t.Errorf("credit amount = %d, want 10000", creditPayload.Amount)
+	}
+	if creditPayload.SourceStep != "deposit_credit" {
+		t.Errorf("credit source_step = %s, want deposit_credit", creditPayload.SourceStep)
+	}
+
+	// Verify saga is still running (not yet completed).
+	updated, _ := repo.GetSagaByID(ctx, s.ID)
+	if updated.Status != StatusRunning {
+		t.Errorf("saga status = %s, want running", updated.Status)
+	}
+
+	// Step 2: wallet.credited -> should complete the saga.
+	env = newTestEnvelope(t, messaging.RoutingKeyWalletCredited, txnID, messaging.WalletCredited{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        10000,
+		BalanceAfter:  20000,
+		SourceStep:    "deposit_credit",
+	})
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("handleWalletCredited: %v", err)
+	}
+
+	// Verify saga is completed with succeeded outcome.
+	final, _ := repo.GetSagaByID(ctx, s.ID)
+	if final.Status != StatusCompleted {
+		t.Errorf("saga status = %s, want completed", final.Status)
+	}
+	if final.Outcome == nil || *final.Outcome != OutcomeSucceeded {
+		t.Errorf("saga outcome = %v, want succeeded", final.Outcome)
+	}
+	if final.CurrentStep == nil || *final.CurrentStep != "deposit_completed" {
+		t.Errorf("current_step = %v, want deposit_completed", final.CurrentStep)
+	}
+
+	// Verify transaction was marked completed.
+	updates := payments.Updates()
+	if len(updates) != 1 {
+		t.Fatalf("expected 1 status update, got %d", len(updates))
+	}
+	if updates[0].TransactionID != txnID {
+		t.Errorf("transaction_id = %s, want %s", updates[0].TransactionID, txnID)
+	}
+	if updates[0].Status != "completed" {
+		t.Errorf("status = %s, want completed", updates[0].Status)
+	}
+}
+
+func TestDepositFlow_ProviderFailure(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &recordingPaymentsClient{}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-deposit-fail"
+	step := "deposit_charge"
+	s := createDepositSaga(t, repo, txnID, StatusRunning, &step)
+
+	// provider.charge.failed -> should fail the saga.
+	env := newTestEnvelope(t, messaging.RoutingKeyProviderChargeFailed, txnID, messaging.ProviderChargeFailed{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        10000,
+		Reason:        "card declined",
+	})
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("handleProviderChargeFailed: %v", err)
+	}
+
+	// Verify saga is failed.
+	final, _ := repo.GetSagaByID(ctx, s.ID)
+	if final.Status != StatusFailed {
+		t.Errorf("saga status = %s, want failed", final.Status)
+	}
+	if final.Outcome == nil || *final.Outcome != OutcomeFailed {
+		t.Errorf("saga outcome = %v, want failed", final.Outcome)
+	}
+	if final.CurrentStep == nil || *final.CurrentStep != "deposit_charge_failed" {
+		t.Errorf("current_step = %v, want deposit_charge_failed", final.CurrentStep)
+	}
+
+	// Verify transaction was marked failed.
+	updates := payments.Updates()
+	if len(updates) != 1 {
+		t.Fatalf("expected 1 status update, got %d", len(updates))
+	}
+	if updates[0].Status != "failed" {
+		t.Errorf("status = %s, want failed", updates[0].Status)
+	}
+	if updates[0].Reason == nil {
+		t.Fatal("expected status reason, got nil")
+	}
+
+	// No commands should have been published (no wallet credit).
+	if len(pub.Messages()) != 0 {
+		t.Errorf("expected no published messages, got %d", len(pub.Messages()))
+	}
+}
+
+func TestDepositFlow_ProviderTimeout(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &recordingPaymentsClient{}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-deposit-timeout"
+	step := "deposit_charge"
+	// Create a deposit saga already timed_out by the timeout poller.
+	s := createDepositSaga(t, repo, txnID, StatusTimedOut, &step)
+
+	// Verify saga is timed_out.
+	current, _ := repo.GetSagaByID(ctx, s.ID)
+	if current.Status != StatusTimedOut {
+		t.Fatalf("saga status = %s, want timed_out", current.Status)
+	}
+
+	// A late provider.charge.failed arrives after timeout -> should fail the saga.
+	env := newTestEnvelope(t, messaging.RoutingKeyProviderChargeFailed, txnID, messaging.ProviderChargeFailed{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        10000,
+		Reason:        "provider timeout",
+	})
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("handleProviderChargeFailed on timed_out saga: %v", err)
+	}
+
+	// Verify saga transitioned from timed_out to failed.
+	final, _ := repo.GetSagaByID(ctx, s.ID)
+	if final.Status != StatusFailed {
+		t.Errorf("saga status = %s, want failed", final.Status)
+	}
+	if final.Outcome == nil || *final.Outcome != OutcomeFailed {
+		t.Errorf("saga outcome = %v, want failed", final.Outcome)
+	}
+
+	// Verify transaction was updated to failed.
+	updates := payments.Updates()
+	if len(updates) != 1 {
+		t.Fatalf("expected 1 status update, got %d", len(updates))
+	}
+	if updates[0].Status != "failed" {
+		t.Errorf("status = %s, want failed", updates[0].Status)
+	}
+}
+
+func TestDepositFlow_LateSuccessAfterTimeout(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &recordingPaymentsClient{}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-deposit-late-success"
+	step := "deposit_charge"
+	// Create a deposit saga already timed_out.
+	s := createDepositSaga(t, repo, txnID, StatusTimedOut, &step)
+
+	// Late provider.charge.succeeded arrives after timeout.
+	env := newTestEnvelope(t, messaging.RoutingKeyProviderChargeSucceeded, txnID, messaging.ProviderChargeSucceeded{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        10000,
+		ProviderRef:   "sim-" + txnID,
+	})
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("handleProviderChargeSucceeded on timed_out saga: %v", err)
+	}
+
+	// Verify wallet.credit.requested was published (late success resumes the flow).
+	msgs := pub.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 published message, got %d", len(msgs))
+	}
+	if msgs[0].RoutingKey != messaging.RoutingKeyWalletCreditRequested {
+		t.Errorf("routing key = %s, want %s", msgs[0].RoutingKey, messaging.RoutingKeyWalletCreditRequested)
+	}
+
+	creditPayload, ok := msgs[0].Payload.(messaging.WalletCreditRequested)
+	if !ok {
+		t.Fatalf("expected WalletCreditRequested payload, got %T", msgs[0].Payload)
+	}
+	if creditPayload.SourceStep != "deposit_credit" {
+		t.Errorf("source_step = %s, want deposit_credit", creditPayload.SourceStep)
+	}
+
+	// Step 2: wallet.credited -> should complete the saga from timed_out state.
+	env = newTestEnvelope(t, messaging.RoutingKeyWalletCredited, txnID, messaging.WalletCredited{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        10000,
+		BalanceAfter:  20000,
+		SourceStep:    "deposit_credit",
+	})
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("handleWalletCredited on timed_out saga: %v", err)
+	}
+
+	// Verify saga is completed with succeeded outcome.
+	final, _ := repo.GetSagaByID(ctx, s.ID)
+	if final.Status != StatusCompleted {
+		t.Errorf("saga status = %s, want completed", final.Status)
+	}
+	if final.Outcome == nil || *final.Outcome != OutcomeSucceeded {
+		t.Errorf("saga outcome = %v, want succeeded", final.Outcome)
+	}
+	if final.CurrentStep == nil || *final.CurrentStep != "deposit_completed" {
+		t.Errorf("current_step = %v, want deposit_completed", final.CurrentStep)
+	}
+
+	// Verify transaction was marked completed.
+	updates := payments.Updates()
+	if len(updates) != 1 {
+		t.Fatalf("expected 1 status update, got %d", len(updates))
+	}
+	if updates[0].Status != "completed" {
+		t.Errorf("status = %s, want completed", updates[0].Status)
+	}
+}
+
+func TestDepositFlow_DuplicateProviderCallbackDedupe(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &recordingPaymentsClient{}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-deposit-dup-callback"
+	step := "deposit_charge"
+	s := createDepositSaga(t, repo, txnID, StatusRunning, &step)
+
+	// First delivery: provider.charge.succeeded -> publishes wallet.credit.requested.
+	env := newTestEnvelope(t, messaging.RoutingKeyProviderChargeSucceeded, txnID, messaging.ProviderChargeSucceeded{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        10000,
+		ProviderRef:   "sim-" + txnID,
+	})
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("first handleProviderChargeSucceeded: %v", err)
+	}
+
+	if len(pub.Messages()) != 1 {
+		t.Fatalf("expected 1 message after first delivery, got %d", len(pub.Messages()))
+	}
+
+	// wallet.credited -> completes the saga.
+	creditEnv := newTestEnvelope(t, messaging.RoutingKeyWalletCredited, txnID, messaging.WalletCredited{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        10000,
+		BalanceAfter:  20000,
+		SourceStep:    "deposit_credit",
+	})
+	if err := handler.HandleOutcome(ctx, creditEnv); err != nil {
+		t.Fatalf("handleWalletCredited: %v", err)
+	}
+
+	final, _ := repo.GetSagaByID(ctx, s.ID)
+	if final.Status != StatusCompleted {
+		t.Fatalf("saga status = %s, want completed", final.Status)
+	}
+
+	updatesBefore := len(payments.Updates())
+	msgsBefore := len(pub.Messages())
+
+	// Second delivery (duplicate) of provider.charge.succeeded -> should be ignored.
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("second handleProviderChargeSucceeded: %v", err)
+	}
+
+	// No new messages or status updates.
+	if len(pub.Messages()) != msgsBefore {
+		t.Errorf("expected no new messages on duplicate, got %d new", len(pub.Messages())-msgsBefore)
+	}
+	if len(payments.Updates()) != updatesBefore {
+		t.Errorf("expected no new status updates on duplicate, got %d new", len(payments.Updates())-updatesBefore)
+	}
+
+	// Saga should still be completed.
+	final, _ = repo.GetSagaByID(ctx, s.ID)
+	if final.Status != StatusCompleted {
+		t.Errorf("after duplicate: saga status = %s, want completed", final.Status)
+	}
+}

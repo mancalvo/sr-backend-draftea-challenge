@@ -123,6 +123,30 @@ func (h *Handler) HandleDeposit(w http.ResponseWriter, r *http.Request) {
 
 	logger.Info("deposit saga created", "saga_id", sagaInstance.ID)
 
+	// Step 3: Transition saga to running and publish payments.deposit.requested.
+	step := "deposit_charge"
+	if _, err := h.repo.UpdateSagaStatus(r.Context(), sagaInstance.ID, StatusRunning, nil, &step); err != nil {
+		logger.Error("failed to transition saga to running", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	if err := h.publisher.Publish(r.Context(),
+		messaging.ExchangeCommands,
+		messaging.RoutingKeyDepositRequested,
+		transactionID,
+		messaging.DepositRequested{
+			TransactionID: transactionID,
+			UserID:        cmd.UserID,
+			Amount:        cmd.Amount,
+			Currency:      cmd.Currency,
+		},
+	); err != nil {
+		logger.Error("failed to publish payments.deposit.requested", "error", err)
+		// Saga is already running but command was not sent. The timeout poller
+		// will eventually handle this. We still return 202 since the saga exists.
+	}
+
 	// Save idempotency key.
 	h.saveIdempotencyKey(r.Context(), cmd.IdempotencyKey, transactionID, http.StatusAccepted)
 

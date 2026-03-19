@@ -618,11 +618,93 @@ func TestDepositCreatedSagaHasCorrectType(t *testing.T) {
 	if saga.Type != SagaTypeDeposit {
 		t.Errorf("saga type = %s, want deposit", saga.Type)
 	}
-	if saga.Status != StatusCreated {
-		t.Errorf("saga status = %s, want created", saga.Status)
+	if saga.Status != StatusRunning {
+		t.Errorf("saga status = %s, want running", saga.Status)
 	}
 	if saga.TimeoutAt == nil {
 		t.Error("expected saga timeout_at to be set")
+	}
+}
+
+// TestHandleDeposit_InitiatesWorkflow verifies that HandleDeposit transitions the
+// saga to running and publishes payments.deposit.requested.
+func TestHandleDeposit_InitiatesWorkflow(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &mockPaymentsClient{}
+	h := NewHandler(repo, &mockCatalogClient{}, payments, pub, 30*time.Second, testLogger())
+	router := newTestRouter(h)
+
+	body, _ := json.Marshal(DepositCommand{
+		UserID:         "user-1",
+		Amount:         10000,
+		Currency:       "ARS",
+		IdempotencyKey: "dep-init-1",
+	})
+
+	req := httptest.NewRequest("POST", "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != 202 {
+		t.Fatalf("status = %d, want 202; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Extract transaction ID from response.
+	var resp struct {
+		Data struct {
+			TransactionID string `json:"transaction_id"`
+		} `json:"data"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp)
+	txnID := resp.Data.TransactionID
+	if txnID == "" {
+		t.Fatal("empty transaction_id in response")
+	}
+
+	// Verify saga was created and transitioned to running.
+	s, err := repo.GetSagaByTransactionID(context.Background(), txnID)
+	if err != nil {
+		t.Fatalf("get saga: %v", err)
+	}
+	if s.Status != StatusRunning {
+		t.Errorf("saga status = %s, want running", s.Status)
+	}
+	if s.CurrentStep == nil || *s.CurrentStep != "deposit_charge" {
+		t.Errorf("current_step = %v, want deposit_charge", s.CurrentStep)
+	}
+	if s.Type != SagaTypeDeposit {
+		t.Errorf("saga type = %s, want deposit", s.Type)
+	}
+
+	// Verify payments.deposit.requested was published.
+	msgs := pub.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 published message, got %d", len(msgs))
+	}
+	if msgs[0].RoutingKey != messaging.RoutingKeyDepositRequested {
+		t.Errorf("routing key = %s, want %s", msgs[0].RoutingKey, messaging.RoutingKeyDepositRequested)
+	}
+	if msgs[0].Exchange != messaging.ExchangeCommands {
+		t.Errorf("exchange = %s, want %s", msgs[0].Exchange, messaging.ExchangeCommands)
+	}
+
+	depositPayload, ok := msgs[0].Payload.(messaging.DepositRequested)
+	if !ok {
+		t.Fatalf("expected DepositRequested payload, got %T", msgs[0].Payload)
+	}
+	if depositPayload.TransactionID != txnID {
+		t.Errorf("deposit transaction_id = %s, want %s", depositPayload.TransactionID, txnID)
+	}
+	if depositPayload.UserID != "user-1" {
+		t.Errorf("deposit user_id = %s, want user-1", depositPayload.UserID)
+	}
+	if depositPayload.Amount != 10000 {
+		t.Errorf("deposit amount = %d, want 10000", depositPayload.Amount)
+	}
+	if depositPayload.Currency != "ARS" {
+		t.Errorf("deposit currency = %s, want ARS", depositPayload.Currency)
 	}
 }
 
