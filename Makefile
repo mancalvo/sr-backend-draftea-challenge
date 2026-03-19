@@ -1,4 +1,4 @@
-.PHONY: build test test-platform test-messaging test-catalog-access test-payments test-wallets test-saga test-deposit-flow test-purchase-flow test-refund-flow test-observability vet fmt check clean \
+.PHONY: build test test-platform test-messaging test-catalog-access test-payments test-wallets test-saga test-deposit-flow test-purchase-flow test-refund-flow test-observability test-integration vet fmt check clean \
        check-migrations migrate-up migrate-down migrate-create check-compose
 
 SERVICES     := api-gateway saga-orchestrator payments wallets catalog-access
@@ -58,6 +58,10 @@ test-refund-flow:
 test-observability:
 	go test ./test/observability/... ./internal/platform/health/... ./internal/platform/logging/...
 
+## test-integration: run representative integration tests (purchase, refund, deposit, concurrency)
+test-integration:
+	go test ./test/integration/...
+
 ## vet: run go vet
 vet:
 	go vet ./...
@@ -66,8 +70,8 @@ vet:
 fmt:
 	@test -z "$$(gofmt -l .)" || { echo "files not formatted:"; gofmt -l .; exit 1; }
 
-## check: run fmt + vet + test + build
-check: fmt vet test build
+## check: run all quality gates (fmt, vet, tests, migrations, compose, build)
+check: fmt vet test test-integration check-migrations check-compose build
 
 ## clean: remove build artifacts
 clean:
