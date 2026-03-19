@@ -1,4 +1,4 @@
-.PHONY: build test test-platform test-messaging test-catalog-access test-payments vet fmt check clean \
+.PHONY: build test test-platform test-messaging test-catalog-access test-payments test-wallets vet fmt check clean \
        check-migrations migrate-up migrate-down migrate-create
 
 SERVICES     := api-gateway saga-orchestrator payments wallets catalog-access
@@ -33,6 +33,10 @@ test-catalog-access:
 ## test-payments: run payments service tests
 test-payments:
 	go test ./internal/services/payments/...
+
+## test-wallets: run wallets service tests
+test-wallets:
+	go test ./internal/services/wallets/...
 
 ## vet: run go vet
 vet:
