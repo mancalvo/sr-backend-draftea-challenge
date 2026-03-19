@@ -12,6 +12,7 @@ import (
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 )
 
 // DefaultSagaTimeout is the default duration before a saga times out.
@@ -213,6 +214,31 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Info("purchase saga created", "saga_id", sagaInstance.ID)
+
+	// Step 4: Transition saga to running and publish wallet.debit.requested.
+	step := "purchase_debit"
+	if _, err := h.repo.UpdateSagaStatus(r.Context(), sagaInstance.ID, StatusRunning, nil, &step); err != nil {
+		logger.Error("failed to transition saga to running", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	if err := h.publisher.Publish(r.Context(),
+		messaging.ExchangeCommands,
+		messaging.RoutingKeyWalletDebitRequested,
+		transactionID,
+		messaging.WalletDebitRequested{
+			TransactionID: transactionID,
+			UserID:        cmd.UserID,
+			Amount:        cmd.Amount,
+			Currency:      cmd.Currency,
+			SourceStep:    step,
+		},
+	); err != nil {
+		logger.Error("failed to publish wallet.debit.requested", "error", err)
+		// Saga is already running but command was not sent. The timeout poller
+		// will eventually handle this. We still return 202 since the saga exists.
+	}
 
 	// Save idempotency key.
 	h.saveIdempotencyKey(r.Context(), cmd.IdempotencyKey, transactionID, http.StatusAccepted)

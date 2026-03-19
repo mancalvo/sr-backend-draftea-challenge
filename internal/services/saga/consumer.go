@@ -2,6 +2,8 @@ package saga
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -79,8 +81,26 @@ func (c *ConsumerHandler) lookupSaga(ctx context.Context, transactionID string, 
 }
 
 // ---- Individual outcome handlers ----
-// These are stubs that will be fully implemented in T09/T10/T11 (workflow tasks).
-// For T08 they establish the routing structure and perform saga lookup.
+
+// decodePurchasePayload extracts PurchasePayload from a saga's stored payload.
+func decodePurchasePayload(s *SagaInstance) (*PurchasePayload, error) {
+	var p PurchasePayload
+	if err := json.Unmarshal(s.Payload, &p); err != nil {
+		return nil, fmt.Errorf("decode purchase payload: %w", err)
+	}
+	return &p, nil
+}
+
+// isSagaTerminal returns true if the saga is already in a terminal state
+// (completed, failed, reconciliation_required). Used to handle duplicate
+// event redelivery gracefully.
+func isSagaTerminal(s *SagaInstance) bool {
+	switch s.Status {
+	case StatusCompleted, StatusFailed, StatusReconciliationRequired:
+		return true
+	}
+	return false
+}
 
 func (c *ConsumerHandler) handleWalletDebited(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
 	var payload messaging.WalletDebited
@@ -89,13 +109,45 @@ func (c *ConsumerHandler) handleWalletDebited(ctx context.Context, env messaging
 	}
 	logger = logger.With(slog.String(logging.KeyTransactionID, payload.TransactionID))
 
-	saga, err := c.lookupSaga(ctx, payload.TransactionID, logger)
+	s, err := c.lookupSaga(ctx, payload.TransactionID, logger)
 	if err != nil {
 		return err
 	}
 
-	logger.Info("received wallet.debited", "saga_id", saga.ID, "saga_status", string(saga.Status))
-	// Workflow progression will be implemented in T09/T10/T11.
+	logger.Info("received wallet.debited", "saga_id", s.ID, "saga_status", string(s.Status))
+
+	// Idempotent: if the saga already moved past this step, ignore.
+	if isSagaTerminal(s) || s.Status == StatusCompensating {
+		logger.Info("saga already past debit step, ignoring duplicate wallet.debited")
+		return nil
+	}
+
+	// Only purchase sagas proceed with access grant after debit.
+	if s.Type != SagaTypePurchase {
+		// Other workflow types (deposit) handle this event in their own tasks.
+		return nil
+	}
+
+	purchasePayload, err := decodePurchasePayload(s)
+	if err != nil {
+		return err
+	}
+
+	// Publish access.grant.requested.
+	if err := c.publisher.Publish(ctx,
+		messaging.ExchangeCommands,
+		messaging.RoutingKeyAccessGrantRequested,
+		s.TransactionID,
+		messaging.AccessGrantRequested{
+			TransactionID: s.TransactionID,
+			UserID:        purchasePayload.UserID,
+			OfferingID:    purchasePayload.OfferingID,
+		},
+	); err != nil {
+		return fmt.Errorf("publish access.grant.requested: %w", err)
+	}
+
+	logger.Info("published access.grant.requested", "saga_id", s.ID)
 	return nil
 }
 
@@ -106,12 +158,41 @@ func (c *ConsumerHandler) handleWalletDebitRejected(ctx context.Context, env mes
 	}
 	logger = logger.With(slog.String(logging.KeyTransactionID, payload.TransactionID))
 
-	saga, err := c.lookupSaga(ctx, payload.TransactionID, logger)
+	s, err := c.lookupSaga(ctx, payload.TransactionID, logger)
 	if err != nil {
 		return err
 	}
 
-	logger.Info("received wallet.debit.rejected", "saga_id", saga.ID, "reason", payload.Reason)
+	logger.Info("received wallet.debit.rejected", "saga_id", s.ID, "reason", payload.Reason)
+
+	// Idempotent: already terminal, nothing to do.
+	if isSagaTerminal(s) {
+		logger.Info("saga already terminal, ignoring duplicate wallet.debit.rejected")
+		return nil
+	}
+
+	if s.Type != SagaTypePurchase {
+		return nil
+	}
+
+	// Insufficient funds -> fail the saga and the transaction.
+	outcome := OutcomeFailed
+	step := "purchase_debit_rejected"
+	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusFailed, &outcome, &step); err != nil {
+		if errors.Is(err, ErrIllegalTransition) {
+			logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
+			return nil
+		}
+		return fmt.Errorf("update saga to failed: %w", err)
+	}
+
+	reason := fmt.Sprintf("insufficient funds: %s", payload.Reason)
+	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason); err != nil {
+		logger.Error("failed to update transaction to failed", "error", err)
+		return fmt.Errorf("update transaction status to failed: %w", err)
+	}
+
+	logger.Info("purchase saga failed due to insufficient funds", "saga_id", s.ID)
 	return nil
 }
 
@@ -122,12 +203,42 @@ func (c *ConsumerHandler) handleWalletCredited(ctx context.Context, env messagin
 	}
 	logger = logger.With(slog.String(logging.KeyTransactionID, payload.TransactionID))
 
-	saga, err := c.lookupSaga(ctx, payload.TransactionID, logger)
+	s, err := c.lookupSaga(ctx, payload.TransactionID, logger)
 	if err != nil {
 		return err
 	}
 
-	logger.Info("received wallet.credited", "saga_id", saga.ID, "saga_status", string(saga.Status))
+	logger.Info("received wallet.credited", "saga_id", s.ID, "saga_status", string(s.Status))
+
+	// Idempotent: already terminal, nothing to do.
+	if isSagaTerminal(s) {
+		logger.Info("saga already terminal, ignoring duplicate wallet.credited")
+		return nil
+	}
+
+	// For purchase sagas in compensating status: credit completes the compensation.
+	if s.Type == SagaTypePurchase && s.Status == StatusCompensating {
+		outcome := OutcomeCompensated
+		step := "purchase_compensation_credited"
+		if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusCompleted, &outcome, &step); err != nil {
+			if errors.Is(err, ErrIllegalTransition) {
+				logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
+				return nil
+			}
+			return fmt.Errorf("update saga to completed (compensated): %w", err)
+		}
+
+		reason := "access grant conflicted, debit reversed"
+		if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "compensated", &reason); err != nil {
+			logger.Error("failed to update transaction to compensated", "error", err)
+			return fmt.Errorf("update transaction status to compensated: %w", err)
+		}
+
+		logger.Info("purchase saga completed with compensation", "saga_id", s.ID)
+		return nil
+	}
+
+	// Other saga types (refund) will handle wallet.credited in T10/T11.
 	return nil
 }
 
@@ -138,12 +249,40 @@ func (c *ConsumerHandler) handleAccessGranted(ctx context.Context, env messaging
 	}
 	logger = logger.With(slog.String(logging.KeyTransactionID, payload.TransactionID))
 
-	saga, err := c.lookupSaga(ctx, payload.TransactionID, logger)
+	s, err := c.lookupSaga(ctx, payload.TransactionID, logger)
 	if err != nil {
 		return err
 	}
 
-	logger.Info("received access.granted", "saga_id", saga.ID, "saga_status", string(saga.Status))
+	logger.Info("received access.granted", "saga_id", s.ID, "saga_status", string(s.Status))
+
+	// Idempotent: already terminal, nothing to do.
+	if isSagaTerminal(s) {
+		logger.Info("saga already terminal, ignoring duplicate access.granted")
+		return nil
+	}
+
+	if s.Type != SagaTypePurchase {
+		return nil
+	}
+
+	// Access granted -> purchase completed successfully.
+	outcome := OutcomeSucceeded
+	step := "purchase_completed"
+	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusCompleted, &outcome, &step); err != nil {
+		if errors.Is(err, ErrIllegalTransition) {
+			logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
+			return nil
+		}
+		return fmt.Errorf("update saga to completed: %w", err)
+	}
+
+	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil); err != nil {
+		logger.Error("failed to update transaction to completed", "error", err)
+		return fmt.Errorf("update transaction status to completed: %w", err)
+	}
+
+	logger.Info("purchase saga completed successfully", "saga_id", s.ID)
 	return nil
 }
 
@@ -154,12 +293,54 @@ func (c *ConsumerHandler) handleAccessGrantConflicted(ctx context.Context, env m
 	}
 	logger = logger.With(slog.String(logging.KeyTransactionID, payload.TransactionID))
 
-	saga, err := c.lookupSaga(ctx, payload.TransactionID, logger)
+	s, err := c.lookupSaga(ctx, payload.TransactionID, logger)
 	if err != nil {
 		return err
 	}
 
-	logger.Info("received access.grant.conflicted", "saga_id", saga.ID, "reason", payload.Reason)
+	logger.Info("received access.grant.conflicted", "saga_id", s.ID, "reason", payload.Reason)
+
+	// Idempotent: already terminal or compensating, nothing to do.
+	if isSagaTerminal(s) || s.Status == StatusCompensating {
+		logger.Info("saga already past grant step, ignoring duplicate access.grant.conflicted")
+		return nil
+	}
+
+	if s.Type != SagaTypePurchase {
+		return nil
+	}
+
+	purchasePayload, err := decodePurchasePayload(s)
+	if err != nil {
+		return err
+	}
+
+	// Access grant conflicted after debit -> compensate by crediting wallet.
+	step := "purchase_compensation_credit"
+	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusCompensating, nil, &step); err != nil {
+		if errors.Is(err, ErrIllegalTransition) {
+			logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
+			return nil
+		}
+		return fmt.Errorf("update saga to compensating: %w", err)
+	}
+
+	if err := c.publisher.Publish(ctx,
+		messaging.ExchangeCommands,
+		messaging.RoutingKeyWalletCreditRequested,
+		s.TransactionID,
+		messaging.WalletCreditRequested{
+			TransactionID: s.TransactionID,
+			UserID:        purchasePayload.UserID,
+			Amount:        purchasePayload.Amount,
+			Currency:      purchasePayload.Currency,
+			SourceStep:    "purchase_compensation",
+		},
+	); err != nil {
+		return fmt.Errorf("publish wallet.credit.requested for compensation: %w", err)
+	}
+
+	logger.Info("published wallet.credit.requested for compensation", "saga_id", s.ID)
 	return nil
 }
 
