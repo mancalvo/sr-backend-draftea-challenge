@@ -1,4 +1,4 @@
--- 000004_create_saga_orchestrator_schema.up.sql
+-- 000001_create_saga_orchestrator_schema.up.sql
 -- Schema: saga_orchestrator
 -- Owns: saga_instances, idempotency_keys
 

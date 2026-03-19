@@ -1,4 +1,4 @@
--- 000004_create_saga_orchestrator_schema.down.sql
+-- 000001_create_saga_orchestrator_schema.down.sql
 
 BEGIN;
 

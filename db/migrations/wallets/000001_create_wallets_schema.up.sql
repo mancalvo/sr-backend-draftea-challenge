@@ -1,4 +1,4 @@
--- 000002_create_wallets_schema.up.sql
+-- 000001_create_wallets_schema.up.sql
 -- Schema: wallets
 -- Owns: wallets, wallet_movements
 -- Correctness: row-level locking, atomic balance mutation, movement dedupe

@@ -37,7 +37,7 @@ func DefaultTopology() Topology {
 		Exchanges: []ExchangeDeclaration{
 			{Name: messaging.ExchangeCommands, Kind: "topic", Durable: true},
 			{Name: messaging.ExchangeOutcomes, Kind: "topic", Durable: true},
-			{Name: messaging.ExchangeDLX, Kind: "topic", Durable: true},
+			{Name: messaging.ExchangeDLX, Kind: "fanout", Durable: true},
 		},
 		Queues: []QueueDeclaration{
 			{
@@ -93,6 +93,12 @@ func DefaultTopology() Topology {
 				Args: amqp.Table{
 					"x-dead-letter-exchange": messaging.ExchangeDLX,
 				},
+			},
+			// Catch-all dead-letter queue bound to the DLX fanout exchange.
+			{
+				Name:     messaging.QueueDeadLetter,
+				Durable:  true,
+				Exchange: messaging.ExchangeDLX,
 			},
 		},
 	}

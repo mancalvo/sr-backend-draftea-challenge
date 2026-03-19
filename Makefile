@@ -1,10 +1,10 @@
 .PHONY: build test test-platform test-messaging test-catalog-access test-payments test-wallets test-saga test-deposit-flow test-purchase-flow test-refund-flow test-observability test-integration vet fmt check clean \
        check-migrations migrate-up migrate-down migrate-create check-compose
 
-SERVICES     := api-gateway saga-orchestrator payments wallets catalog-access
-BIN_DIR      := bin
-MIGRATIONS   := db/migrations
-DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)?sslmode=disable
+SERVICES       := api-gateway saga-orchestrator payments wallets catalog-access
+BIN_DIR        := bin
+MIGRATION_DIRS := db/migrations/payments db/migrations/wallets db/migrations/catalogaccess db/migrations/saga
+DATABASE_URL   ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)?sslmode=disable
 
 ## build: compile all service binaries into bin/
 build:
@@ -79,39 +79,47 @@ clean:
 
 ## ---- Migrations ----
 
-## check-migrations: validate migration files (sequential numbering, matching up/down pairs)
+## check-migrations: validate per-service migration files (matching up/down pairs, naming)
 check-migrations:
-	@echo "checking migration file pairs..."
-	@ups=$$(ls $(MIGRATIONS)/*.up.sql 2>/dev/null | wc -l | tr -d ' '); \
-	downs=$$(ls $(MIGRATIONS)/*.down.sql 2>/dev/null | wc -l | tr -d ' '); \
-	if [ "$$ups" -eq 0 ]; then echo "ERROR: no up migrations found"; exit 1; fi; \
-	if [ "$$ups" -ne "$$downs" ]; then echo "ERROR: mismatched up ($$ups) / down ($$downs) migration count"; exit 1; fi; \
-	echo "  $$ups up + $$downs down migration files OK"
-	@echo "checking migration file naming..."
-	@for f in $(MIGRATIONS)/*.sql; do \
-		base=$$(basename $$f); \
-		echo "$$base" | grep -qE '^[0-9]+_[a-z_]+\.(up|down)\.sql$$' || \
-		{ echo "ERROR: bad migration filename: $$base"; exit 1; }; \
+	@for dir in $(MIGRATION_DIRS); do \
+		echo "checking $$dir..."; \
+		ups=$$(ls $$dir/*.up.sql 2>/dev/null | wc -l | tr -d ' '); \
+		downs=$$(ls $$dir/*.down.sql 2>/dev/null | wc -l | tr -d ' '); \
+		if [ "$$ups" -eq 0 ]; then echo "ERROR: no up migrations in $$dir"; exit 1; fi; \
+		if [ "$$ups" -ne "$$downs" ]; then echo "ERROR: mismatched up ($$ups) / down ($$downs) in $$dir"; exit 1; fi; \
+		echo "  $$ups up + $$downs down migration files OK"; \
+		for f in $$dir/*.sql; do \
+			base=$$(basename $$f); \
+			echo "$$base" | grep -qE '^[0-9]+_[a-z_]+\.(up|down)\.sql$$' || \
+			{ echo "ERROR: bad migration filename: $$base in $$dir"; exit 1; }; \
+		done; \
+		echo "  filenames OK"; \
+		for f in $$dir/*.sql; do \
+			if [ ! -s "$$f" ]; then echo "ERROR: empty migration file: $$f"; exit 1; fi; \
+		done; \
+		echo "  no empty files OK"; \
 	done
-	@echo "  all filenames OK"
-	@echo "validating migration SQL syntax (basic)..."
-	@for f in $(MIGRATIONS)/*.sql; do \
-		if [ ! -s "$$f" ]; then echo "ERROR: empty migration file: $$f"; exit 1; fi; \
-	done
-	@echo "  no empty files OK"
 	@echo "check-migrations passed"
 
-## migrate-up: run all up migrations
+## migrate-up: run all per-service migrations
 migrate-up:
-	migrate -path $(MIGRATIONS) -database "$(DATABASE_URL)" up
+	@for dir in $(MIGRATION_DIRS); do \
+		svc=$$(basename $$dir); \
+		echo "migrating $$svc..."; \
+		migrate -path $$dir -database "$(DATABASE_URL)&x-migrations-table=$${svc}_schema_migrations" up; \
+	done
 
-## migrate-down: roll back all migrations
+## migrate-down: roll back all per-service migrations
 migrate-down:
-	migrate -path $(MIGRATIONS) -database "$(DATABASE_URL)" down -all
+	@for dir in $(MIGRATION_DIRS); do \
+		svc=$$(basename $$dir); \
+		echo "rolling back $$svc..."; \
+		migrate -path $$dir -database "$(DATABASE_URL)&x-migrations-table=$${svc}_schema_migrations" down -all; \
+	done
 
-## migrate-create: create a new migration pair (usage: make migrate-create NAME=create_foo)
+## migrate-create: create a new migration pair (usage: make migrate-create SVC=payments NAME=add_foo)
 migrate-create:
-	migrate create -ext sql -dir $(MIGRATIONS) -seq $(NAME)
+	migrate create -ext sql -dir db/migrations/$(SVC) -seq $(NAME)
 
 ## ---- Docker Compose ----
 

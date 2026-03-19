@@ -1,4 +1,4 @@
--- 000003_create_catalog_access_schema.down.sql
+-- 000001_create_catalog_access_schema.down.sql
 
 BEGIN;
 

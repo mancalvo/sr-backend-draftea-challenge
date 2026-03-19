@@ -8,3 +8,5 @@ require (
 	github.com/lib/pq v1.12.0
 	github.com/rabbitmq/amqp091-go v1.10.0
 )
+
+require github.com/golang-migrate/migrate/v4 v4.19.1

@@ -1,4 +1,4 @@
--- 000003_create_catalog_access_schema.up.sql
+-- 000001_create_catalog_access_schema.up.sql
 -- Schema: catalog_access
 -- Owns: users, offerings, access_records
 

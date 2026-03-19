@@ -1,4 +1,4 @@
--- 000002_create_wallets_schema.down.sql
+-- 000001_create_wallets_schema.down.sql
 
 BEGIN;
 

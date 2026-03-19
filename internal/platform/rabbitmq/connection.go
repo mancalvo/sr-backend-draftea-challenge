@@ -6,6 +6,8 @@ package rabbitmq
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -24,6 +26,33 @@ func Dial(url string, logger *slog.Logger) (*Connection, error) {
 	}
 	logger.Info("rabbitmq connected", "url", sanitizeURL(url))
 	return &Connection{conn: conn, logger: logger}, nil
+}
+
+// DialWithRetry establishes an AMQP connection, retrying with exponential
+// backoff if the broker is not yet available. This is necessary in Docker
+// Compose environments where the application container may start before
+// RabbitMQ's AMQP listener is ready.
+func DialWithRetry(rawURL string, logger *slog.Logger, maxAttempts int, baseDelay time.Duration) (*Connection, error) {
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		conn, err := amqp.Dial(rawURL)
+		if err == nil {
+			logger.Info("rabbitmq connected", "url", sanitizeURL(rawURL), "attempt", attempt)
+			return &Connection{conn: conn, logger: logger}, nil
+		}
+		lastErr = err
+		if attempt < maxAttempts {
+			delay := baseDelay * time.Duration(1<<(attempt-1)) // exponential backoff
+			logger.Warn("rabbitmq not ready, retrying",
+				"attempt", attempt,
+				"max_attempts", maxAttempts,
+				"delay", delay,
+				"error", err,
+			)
+			time.Sleep(delay)
+		}
+	}
+	return nil, fmt.Errorf("rabbitmq dial after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // Channel opens a new AMQP channel on the underlying connection.
@@ -49,11 +78,13 @@ func (c *Connection) IsClosed() bool {
 }
 
 // sanitizeURL masks the password in an AMQP URL for safe logging.
-func sanitizeURL(url string) string {
-	// Simple approach: mask anything between :// user:pass@ pattern
-	const maxLen = 80
-	if len(url) > maxLen {
-		return url[:maxLen] + "..."
+func sanitizeURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "<invalid-url>"
 	}
-	return url
+	if u.User != nil {
+		u.User = url.UserPassword(u.User.Username(), "****")
+	}
+	return u.String()
 }

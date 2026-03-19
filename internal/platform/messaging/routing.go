@@ -13,6 +13,7 @@ const (
 	QueueWalletsCommands       = "wallets.commands"
 	QueueCatalogAccessCommands = "catalog_access.commands"
 	QueueSagaOutcomes          = "saga.outcomes"
+	QueueDeadLetter            = "workflow.dlq"
 )
 
 // Command routing keys.

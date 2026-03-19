@@ -27,7 +27,11 @@ internal/
     wallets/                  Wallet models, repository, atomic debit/credit
     catalogaccess/            User/offering models, access grant/revoke, prechecks
 db/
-  migrations/                 SQL migration files (golang-migrate)
+  migrations/                 Per-service SQL migration directories (golang-migrate)
+    payments/                 Payments schema migrations (embedded at build time)
+    wallets/                  Wallets schema migrations
+    catalogaccess/            Catalog-access schema migrations
+    saga/                     Saga-orchestrator schema migrations
   seeds/                      Seed data for local development
 deploy/
   traefik/                    Traefik static and dynamic configuration
@@ -165,6 +169,10 @@ Client -> POST /refunds -> saga-orchestrator
 | `workflow.outcomes`  | topic  | Outcome events routed to saga queue      |
 | `workflow.dlx`       | fanout | Dead-letter exchange for failed messages |
 
+| Queue                      | Binds To            | Purpose                                         |
+|----------------------------|---------------------|------------------------------------------------|
+| `workflow.dlq`             | `workflow.dlx`      | Catch-all dead-letter queue for inspection     |
+
 | Queue                      | Binds To            | Routing Keys                                    |
 |----------------------------|---------------------|------------------------------------------------|
 | `payments.commands`        | `workflow.commands` | `payments.deposit.requested`                   |
@@ -197,7 +205,7 @@ Client -> POST /refunds -> saga-orchestrator
 
 ## Prerequisites
 
-- Go 1.22+
+- Go 1.25+
 - Docker and Docker Compose
 - Make
 - [golang-migrate](https://github.com/golang-migrate/migrate) (for running migrations)

@@ -80,12 +80,13 @@ func TestDefaultTopology_Exchanges(t *testing.T) {
 	if len(topo.Exchanges) != len(expected) {
 		t.Fatalf("got %d exchanges, want %d", len(topo.Exchanges), len(expected))
 	}
+	expectedKinds := []string{"topic", "topic", "fanout"}
 	for i, ex := range topo.Exchanges {
 		if ex.Name != expected[i] {
 			t.Errorf("exchange[%d].Name = %q, want %q", i, ex.Name, expected[i])
 		}
-		if ex.Kind != "topic" {
-			t.Errorf("exchange[%d].Kind = %q, want %q", i, ex.Kind, "topic")
+		if ex.Kind != expectedKinds[i] {
+			t.Errorf("exchange[%d].Kind = %q, want %q", i, ex.Kind, expectedKinds[i])
 		}
 		if !ex.Durable {
 			t.Errorf("exchange[%d].Durable = false, want true", i)
@@ -100,6 +101,7 @@ func TestDefaultTopology_Queues(t *testing.T) {
 		messaging.QueueWalletsCommands,
 		messaging.QueueCatalogAccessCommands,
 		messaging.QueueSagaOutcomes,
+		messaging.QueueDeadLetter,
 	}
 	if len(topo.Queues) != len(expectedQueues) {
 		t.Fatalf("got %d queues, want %d", len(topo.Queues), len(expectedQueues))
@@ -117,6 +119,10 @@ func TestDefaultTopology_Queues(t *testing.T) {
 func TestDefaultTopology_DLXArgs(t *testing.T) {
 	topo := DefaultTopology()
 	for _, q := range topo.Queues {
+		// The dead-letter queue itself is not routed to a DLX.
+		if q.Name == messaging.QueueDeadLetter {
+			continue
+		}
 		dlx, ok := q.Args["x-dead-letter-exchange"]
 		if !ok {
 			t.Errorf("queue %q missing x-dead-letter-exchange arg", q.Name)
@@ -153,6 +159,7 @@ func TestDefaultTopology_QueueBindings(t *testing.T) {
 			messaging.RoutingKeyProviderChargeSucceeded,
 			messaging.RoutingKeyProviderChargeFailed,
 		},
+		messaging.QueueDeadLetter: {}, // fanout exchange, no routing keys
 	}
 	for _, q := range topo.Queues {
 		want, ok := expected[q.Name]

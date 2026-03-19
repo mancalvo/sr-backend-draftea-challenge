@@ -13,7 +13,9 @@ import (
 
 	_ "github.com/lib/pq"
 
+	walletsmigrations "github.com/draftea/sr-backend-draftea-challenge/db/migrations/wallets"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/config"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/database"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/health"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
@@ -40,18 +42,35 @@ func main() {
 	}
 	logger.Info("database connected")
 
+	// Run service-owned migrations
+	if err := database.MigrateUp(pgCfg.DSN(), walletsmigrations.FS, "wallets_schema_migrations", logger); err != nil {
+		logger.Error("failed to run migrations", "error", err)
+		os.Exit(1)
+	}
+
 	// Repository
 	repo := wallets.NewPostgresRepository(db)
 
-	// RabbitMQ connection
+	// RabbitMQ connection (with retry for Docker Compose startup ordering)
 	rmqCfg := config.LoadRabbitMQ()
-	rmqConn, err := rabbitmq.Dial(rmqCfg.URL(), logger)
+	rmqConn, err := rabbitmq.DialWithRetry(rmqCfg.URL(), logger, 10, time.Second)
 	if err != nil {
 		logger.Error("failed to connect to RabbitMQ", "error", err)
 		os.Exit(1)
 	}
 	defer rmqConn.Close()
-	logger.Info("RabbitMQ connected")
+
+	// Declare RabbitMQ topology (idempotent)
+	topoCh, err := rmqConn.Channel()
+	if err != nil {
+		logger.Error("failed to open topology channel", "error", err)
+		os.Exit(1)
+	}
+	if err := rabbitmq.DeclareTopology(topoCh, rabbitmq.DefaultTopology(), logger); err != nil {
+		logger.Error("failed to declare topology", "error", err)
+		os.Exit(1)
+	}
+	topoCh.Close()
 
 	// Publisher channel
 	pubCh, err := rmqConn.Channel()
