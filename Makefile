@@ -1,4 +1,4 @@
-.PHONY: build test test-platform test-messaging vet fmt check clean \
+.PHONY: build test test-platform test-messaging test-catalog-access vet fmt check clean \
        check-migrations migrate-up migrate-down migrate-create
 
 SERVICES     := api-gateway saga-orchestrator payments wallets catalog-access
@@ -25,6 +25,10 @@ test-platform:
 ## test-messaging: run messaging and rabbitmq package tests
 test-messaging:
 	go test ./internal/platform/messaging/... ./internal/platform/rabbitmq/...
+
+## test-catalog-access: run catalog-access service tests
+test-catalog-access:
+	go test ./internal/services/catalogaccess/...
 
 ## vet: run go vet
 vet:

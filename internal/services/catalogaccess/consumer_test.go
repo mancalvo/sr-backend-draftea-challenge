@@ -1,0 +1,228 @@
+package catalogaccess
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
+)
+
+// mockPublisher records publish calls for test verification.
+type mockPublisher struct {
+	calls []publishCall
+}
+
+type publishCall struct {
+	Exchange      string
+	RoutingKey    string
+	CorrelationID string
+	Payload       any
+}
+
+func (m *mockPublisher) Publish(_ context.Context, exchange, routingKey, correlationID string, payload any) error {
+	m.calls = append(m.calls, publishCall{
+		Exchange:      exchange,
+		RoutingKey:    routingKey,
+		CorrelationID: correlationID,
+		Payload:       payload,
+	})
+	return nil
+}
+
+func makeEnvelope(t *testing.T, msgType string, payload any) messaging.Envelope {
+	t.Helper()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return messaging.Envelope{
+		MessageID:     "msg-test",
+		CorrelationID: "corr-test",
+		Type:          msgType,
+		Timestamp:     time.Now().UTC(),
+		Payload:       json.RawMessage(data),
+	}
+}
+
+// --- access.grant.requested ---
+
+func TestHandleAccessGrantRequested_Success(t *testing.T) {
+	repo := seedRepo(false) // no existing access
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(repo, pub, testLogger())
+
+	cmd := messaging.AccessGrantRequested{
+		TransactionID: "txn-1",
+		UserID:        "user-1",
+		OfferingID:    "offering-1",
+	}
+	env := makeEnvelope(t, messaging.RoutingKeyAccessGrantRequested, cmd)
+
+	err := ch.HandleAccessGrantRequested(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify access was created.
+	if len(repo.AccessRecords) != 1 {
+		t.Fatalf("expected 1 access record, got %d", len(repo.AccessRecords))
+	}
+	ar := repo.AccessRecords[0]
+	if ar.UserID != "user-1" || ar.OfferingID != "offering-1" || ar.TransactionID != "txn-1" {
+		t.Errorf("access record mismatch: %+v", ar)
+	}
+	if ar.Status != AccessStatusActive {
+		t.Errorf("status = %v, want active", ar.Status)
+	}
+
+	// Verify outcome published.
+	if len(pub.calls) != 1 {
+		t.Fatalf("expected 1 publish call, got %d", len(pub.calls))
+	}
+	call := pub.calls[0]
+	if call.RoutingKey != messaging.RoutingKeyAccessGranted {
+		t.Errorf("routing key = %q, want %q", call.RoutingKey, messaging.RoutingKeyAccessGranted)
+	}
+	if call.Exchange != messaging.ExchangeOutcomes {
+		t.Errorf("exchange = %q, want %q", call.Exchange, messaging.ExchangeOutcomes)
+	}
+	if call.CorrelationID != "corr-test" {
+		t.Errorf("correlation_id = %q, want corr-test", call.CorrelationID)
+	}
+}
+
+func TestHandleAccessGrantRequested_DuplicateAccess(t *testing.T) {
+	repo := seedRepo(true) // user-1 already has access to offering-1
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(repo, pub, testLogger())
+
+	cmd := messaging.AccessGrantRequested{
+		TransactionID: "txn-2",
+		UserID:        "user-1",
+		OfferingID:    "offering-1",
+	}
+	env := makeEnvelope(t, messaging.RoutingKeyAccessGrantRequested, cmd)
+
+	err := ch.HandleAccessGrantRequested(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should NOT create a second access record.
+	activeCount := 0
+	for _, ar := range repo.AccessRecords {
+		if ar.Status == AccessStatusActive {
+			activeCount++
+		}
+	}
+	if activeCount != 1 {
+		t.Errorf("expected 1 active access record, got %d", activeCount)
+	}
+
+	// Should publish conflicted outcome.
+	if len(pub.calls) != 1 {
+		t.Fatalf("expected 1 publish call, got %d", len(pub.calls))
+	}
+	call := pub.calls[0]
+	if call.RoutingKey != messaging.RoutingKeyAccessGrantConflicted {
+		t.Errorf("routing key = %q, want %q", call.RoutingKey, messaging.RoutingKeyAccessGrantConflicted)
+	}
+}
+
+// --- access.revoke.requested ---
+
+func TestHandleAccessRevokeRequested_Success(t *testing.T) {
+	repo := seedRepo(true) // has active access for txn-original
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(repo, pub, testLogger())
+
+	cmd := messaging.AccessRevokeRequested{
+		TransactionID: "txn-original",
+		UserID:        "user-1",
+		OfferingID:    "offering-1",
+	}
+	env := makeEnvelope(t, messaging.RoutingKeyAccessRevokeRequested, cmd)
+
+	err := ch.HandleAccessRevokeRequested(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify access was revoked.
+	ar := repo.AccessRecords[0]
+	if ar.Status != AccessStatusRevoked {
+		t.Errorf("status = %v, want revoked", ar.Status)
+	}
+	if ar.RevokedAt == nil {
+		t.Error("revoked_at should be set")
+	}
+
+	// Verify outcome published.
+	if len(pub.calls) != 1 {
+		t.Fatalf("expected 1 publish call, got %d", len(pub.calls))
+	}
+	call := pub.calls[0]
+	if call.RoutingKey != messaging.RoutingKeyAccessRevoked {
+		t.Errorf("routing key = %q, want %q", call.RoutingKey, messaging.RoutingKeyAccessRevoked)
+	}
+}
+
+func TestHandleAccessRevokeRequested_NoActiveAccess(t *testing.T) {
+	repo := seedRepo(false) // no access records
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(repo, pub, testLogger())
+
+	cmd := messaging.AccessRevokeRequested{
+		TransactionID: "txn-nonexistent",
+		UserID:        "user-1",
+		OfferingID:    "offering-1",
+	}
+	env := makeEnvelope(t, messaging.RoutingKeyAccessRevokeRequested, cmd)
+
+	err := ch.HandleAccessRevokeRequested(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should publish revoke rejected outcome.
+	if len(pub.calls) != 1 {
+		t.Fatalf("expected 1 publish call, got %d", len(pub.calls))
+	}
+	call := pub.calls[0]
+	if call.RoutingKey != messaging.RoutingKeyAccessRevokeRejected {
+		t.Errorf("routing key = %q, want %q", call.RoutingKey, messaging.RoutingKeyAccessRevokeRejected)
+	}
+}
+
+func TestHandleAccessRevokeRequested_AlreadyRevoked(t *testing.T) {
+	repo := seedRepo(true)
+	// Manually revoke the access record first.
+	now := time.Now().UTC()
+	repo.AccessRecords[0].Status = AccessStatusRevoked
+	repo.AccessRecords[0].RevokedAt = &now
+
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(repo, pub, testLogger())
+
+	cmd := messaging.AccessRevokeRequested{
+		TransactionID: "txn-original",
+		UserID:        "user-1",
+		OfferingID:    "offering-1",
+	}
+	env := makeEnvelope(t, messaging.RoutingKeyAccessRevokeRequested, cmd)
+
+	err := ch.HandleAccessRevokeRequested(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should be rejected since the access is already revoked.
+	if len(pub.calls) != 1 {
+		t.Fatalf("expected 1 publish call, got %d", len(pub.calls))
+	}
+	if pub.calls[0].RoutingKey != messaging.RoutingKeyAccessRevokeRejected {
+		t.Errorf("routing key = %q, want %q", pub.calls[0].RoutingKey, messaging.RoutingKeyAccessRevokeRejected)
+	}
+}
