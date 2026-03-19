@@ -1,4 +1,4 @@
-.PHONY: build test vet fmt check clean
+.PHONY: build test test-platform vet fmt check clean
 
 SERVICES := api-gateway saga-orchestrator payments wallets catalog-access
 BIN_DIR  := bin
@@ -14,6 +14,10 @@ build:
 ## test: run all tests
 test:
 	go test ./...
+
+## test-platform: run platform package tests only
+test-platform:
+	go test ./internal/platform/...
 
 ## vet: run go vet
 vet:
