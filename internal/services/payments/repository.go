@@ -28,6 +28,10 @@ type Repository interface {
 	// ListTransactionsByUserID returns transactions for a user, ordered by created_at DESC.
 	ListTransactionsByUserID(ctx context.Context, userID string) ([]Transaction, error)
 
+	// ListTransactionsByUserIDPaginated returns a cursor-paginated slice of transactions
+	// for a user, ordered by (created_at DESC, id DESC).
+	ListTransactionsByUserIDPaginated(ctx context.Context, query ListTransactionsQuery) (*ListTransactionsResult, error)
+
 	// UpdateTransactionStatus transitions a transaction to a new status.
 	// It validates the transition legality before applying the change.
 	// Returns ErrNotFound if the transaction does not exist, or ErrIllegalTransition
@@ -112,6 +116,83 @@ func (r *PostgresRepository) ListTransactionsByUserID(ctx context.Context, userI
 		return nil, fmt.Errorf("transaction rows: %w", err)
 	}
 	return result, nil
+}
+
+func (r *PostgresRepository) ListTransactionsByUserIDPaginated(ctx context.Context, query ListTransactionsQuery) (*ListTransactionsResult, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = DefaultPageLimit
+	}
+	if limit > MaxPageLimit {
+		limit = MaxPageLimit
+	}
+
+	// Fetch limit+1 rows so we can detect whether more pages exist.
+	fetchLimit := limit + 1
+	var rows *sql.Rows
+	var err error
+
+	if query.Cursor != nil {
+		const q = `SELECT id, user_id, type, status, amount, currency, offering_id, status_reason, created_at, updated_at
+			FROM payments.transactions
+			WHERE user_id = $1 AND (created_at, id) < ($2, $3)
+			ORDER BY created_at DESC, id DESC
+			LIMIT $4`
+		rows, err = r.db.QueryContext(ctx, q, query.UserID, query.Cursor.CreatedAt, query.Cursor.ID, fetchLimit)
+	} else {
+		const q = `SELECT id, user_id, type, status, amount, currency, offering_id, status_reason, created_at, updated_at
+			FROM payments.transactions
+			WHERE user_id = $1
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2`
+		rows, err = r.db.QueryContext(ctx, q, query.UserID, fetchLimit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list paginated transactions for user %s: %w", query.UserID, err)
+	}
+	defer rows.Close()
+
+	var result []Transaction
+	for rows.Next() {
+		var t Transaction
+		var offeringID sql.NullString
+		var statusReason sql.NullString
+		if err := rows.Scan(
+			&t.ID, &t.UserID, &t.Type, &t.Status,
+			&t.Amount, &t.Currency, &offeringID, &statusReason,
+			&t.CreatedAt, &t.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan transaction: %w", err)
+		}
+		if offeringID.Valid {
+			t.OfferingID = &offeringID.String
+		}
+		if statusReason.Valid {
+			t.StatusReason = &statusReason.String
+		}
+		result = append(result, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("transaction rows: %w", err)
+	}
+
+	hasMore := len(result) > limit
+	if hasMore {
+		result = result[:limit]
+	}
+
+	var nextCursor *string
+	if hasMore && len(result) > 0 {
+		last := result[len(result)-1]
+		encoded := EncodeCursor(Cursor{CreatedAt: last.CreatedAt, ID: last.ID})
+		nextCursor = &encoded
+	}
+
+	return &ListTransactionsResult{
+		Transactions: result,
+		NextCursor:   nextCursor,
+		HasMore:      hasMore,
+	}, nil
 }
 
 func (r *PostgresRepository) UpdateTransactionStatus(ctx context.Context, id string, status TransactionStatus, reason *string) (*Transaction, error) {
@@ -277,6 +358,68 @@ func (m *MemoryRepository) ListTransactionsByUserID(_ context.Context, userID st
 	})
 
 	return result, nil
+}
+
+func (m *MemoryRepository) ListTransactionsByUserIDPaginated(_ context.Context, query ListTransactionsQuery) (*ListTransactionsResult, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	limit := query.Limit
+	if limit <= 0 {
+		limit = DefaultPageLimit
+	}
+	if limit > MaxPageLimit {
+		limit = MaxPageLimit
+	}
+
+	// Collect all transactions for this user.
+	var all []Transaction
+	for _, txn := range m.transactions {
+		if txn.UserID == query.UserID {
+			all = append(all, *txn)
+		}
+	}
+
+	// Sort by (created_at DESC, id DESC).
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].CreatedAt.Equal(all[j].CreatedAt) {
+			return all[i].ID > all[j].ID
+		}
+		return all[i].CreatedAt.After(all[j].CreatedAt)
+	})
+
+	// Apply cursor filter: skip items until we pass the cursor position.
+	if query.Cursor != nil {
+		idx := 0
+		for idx < len(all) {
+			t := all[idx]
+			// In descending order, keep only items where (created_at, id) < (cursor.CreatedAt, cursor.ID).
+			if t.CreatedAt.Before(query.Cursor.CreatedAt) ||
+				(t.CreatedAt.Equal(query.Cursor.CreatedAt) && t.ID < query.Cursor.ID) {
+				break
+			}
+			idx++
+		}
+		all = all[idx:]
+	}
+
+	hasMore := len(all) > limit
+	if hasMore {
+		all = all[:limit]
+	}
+
+	var nextCursor *string
+	if hasMore && len(all) > 0 {
+		last := all[len(all)-1]
+		encoded := EncodeCursor(Cursor{CreatedAt: last.CreatedAt, ID: last.ID})
+		nextCursor = &encoded
+	}
+
+	return &ListTransactionsResult{
+		Transactions: all,
+		NextCursor:   nextCursor,
+		HasMore:      hasMore,
+	}, nil
 }
 
 func (m *MemoryRepository) UpdateTransactionStatus(_ context.Context, id string, status TransactionStatus, reason *string) (*Transaction, error) {

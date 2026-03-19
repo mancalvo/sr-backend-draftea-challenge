@@ -3,9 +3,65 @@
 package payments
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
+
+// Pagination defaults and limits.
+const (
+	DefaultPageLimit = 50
+	MaxPageLimit     = 100
+)
+
+// ErrInvalidCursor is returned when a cursor string cannot be decoded.
+var ErrInvalidCursor = errors.New("invalid cursor")
+
+// ListTransactionsQuery holds the parameters for a paginated transaction list.
+type ListTransactionsQuery struct {
+	UserID string
+	Limit  int
+	Cursor *Cursor
+}
+
+// Cursor encodes the position of the last item on the previous page.
+// It contains enough information to continue the (created_at DESC, id DESC) ordering.
+type Cursor struct {
+	CreatedAt time.Time `json:"ca"`
+	ID        string    `json:"id"`
+}
+
+// EncodeCursor serialises a cursor into a URL-safe, opaque string.
+func EncodeCursor(c Cursor) string {
+	b, _ := json.Marshal(c)
+	return base64.URLEncoding.EncodeToString(b)
+}
+
+// DecodeCursor deserialises a cursor string produced by EncodeCursor.
+// Returns ErrInvalidCursor if the string is malformed.
+func DecodeCursor(s string) (*Cursor, error) {
+	b, err := base64.URLEncoding.DecodeString(s)
+	if err != nil {
+		return nil, ErrInvalidCursor
+	}
+	var c Cursor
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, ErrInvalidCursor
+	}
+	if c.ID == "" || c.CreatedAt.IsZero() {
+		return nil, ErrInvalidCursor
+	}
+	return &c, nil
+}
+
+// ListTransactionsResult is the paginated result returned by the repository.
+type ListTransactionsResult struct {
+	Transactions []Transaction
+	NextCursor   *string
+	HasMore      bool
+}
 
 // TransactionType represents the kind of transaction.
 type TransactionType string

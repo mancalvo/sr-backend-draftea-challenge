@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -396,6 +398,9 @@ func TestListTransactions_Empty(t *testing.T) {
 	if len(txns) != 0 {
 		t.Errorf("expected 0 transactions, got %d", len(txns))
 	}
+	if data["has_more"] != false {
+		t.Error("expected has_more=false")
+	}
 }
 
 func TestListTransactions_MissingUserID(t *testing.T) {
@@ -445,5 +450,242 @@ func TestListTransactions_ReturnsUserTransactionsOnly(t *testing.T) {
 	txn := txns[0].(map[string]any)
 	if txn["id"] != "txn-1" {
 		t.Errorf("id = %v, want txn-1", txn["id"])
+	}
+}
+
+// --- Pagination handler tests ---
+
+func TestListTransactions_DefaultLimitApplied(t *testing.T) {
+	repo := NewMemoryRepository()
+	h := NewHandler(repo, testLogger())
+	router := newTestRouter(h)
+
+	ctx := context.Background()
+	// Create 3 transactions (fewer than default limit).
+	for i := 0; i < 3; i++ {
+		time.Sleep(time.Millisecond)
+		repo.CreateTransaction(ctx, &Transaction{
+			ID: fmt.Sprintf("txn-%d", i), UserID: "user-1",
+			Type: TransactionTypeDeposit, Status: StatusPending,
+			Amount: 1000, Currency: "ARS",
+		})
+	}
+
+	// Request without limit param — should use default and return all 3.
+	req := httptest.NewRequest(http.MethodGet, "/transactions?user_id=user-1", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	data := resp.Data.(map[string]any)
+	txns := data["transactions"].([]any)
+	if len(txns) != 3 {
+		t.Errorf("expected 3 transactions, got %d", len(txns))
+	}
+	if data["has_more"] != false {
+		t.Error("expected has_more=false when all results fit in default limit")
+	}
+}
+
+func TestListTransactions_ExplicitLimitRespected(t *testing.T) {
+	repo := NewMemoryRepository()
+	h := NewHandler(repo, testLogger())
+	router := newTestRouter(h)
+
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		time.Sleep(time.Millisecond)
+		repo.CreateTransaction(ctx, &Transaction{
+			ID: fmt.Sprintf("txn-%d", i), UserID: "user-1",
+			Type: TransactionTypeDeposit, Status: StatusPending,
+			Amount: 1000, Currency: "ARS",
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/transactions?user_id=user-1&limit=2", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	data := resp.Data.(map[string]any)
+	txns := data["transactions"].([]any)
+	if len(txns) != 2 {
+		t.Errorf("expected 2 transactions, got %d", len(txns))
+	}
+	if data["has_more"] != true {
+		t.Error("expected has_more=true")
+	}
+	if data["next_cursor"] == nil {
+		t.Error("expected next_cursor to be set")
+	}
+}
+
+func TestListTransactions_Page1ReturnsNextCursor(t *testing.T) {
+	repo := NewMemoryRepository()
+	h := NewHandler(repo, testLogger())
+	router := newTestRouter(h)
+
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		time.Sleep(time.Millisecond)
+		repo.CreateTransaction(ctx, &Transaction{
+			ID: fmt.Sprintf("txn-%d", i), UserID: "user-1",
+			Type: TransactionTypeDeposit, Status: StatusPending,
+			Amount: 1000, Currency: "ARS",
+		})
+	}
+
+	// Page 1: limit=3.
+	req := httptest.NewRequest(http.MethodGet, "/transactions?user_id=user-1&limit=3", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page 1: status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	data := resp.Data.(map[string]any)
+	if data["next_cursor"] == nil {
+		t.Fatal("page 1: expected next_cursor")
+	}
+
+	// Page 2: use cursor from page 1.
+	cursor := data["next_cursor"].(string)
+	req2 := httptest.NewRequest(http.MethodGet, "/transactions?user_id=user-1&limit=3&cursor="+cursor, nil)
+	rec2 := httptest.NewRecorder()
+	router.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("page 2: status = %d, want %d; body: %s", rec2.Code, http.StatusOK, rec2.Body.String())
+	}
+
+	var resp2 httpx.Response
+	json.NewDecoder(rec2.Body).Decode(&resp2)
+	data2 := resp2.Data.(map[string]any)
+	txns2 := data2["transactions"].([]any)
+	if len(txns2) != 2 {
+		t.Errorf("page 2: expected 2 transactions, got %d", len(txns2))
+	}
+
+	// Verify no duplicates between pages.
+	txns1 := data["transactions"].([]any)
+	seen := make(map[string]bool)
+	for _, raw := range txns1 {
+		id := raw.(map[string]any)["id"].(string)
+		seen[id] = true
+	}
+	for _, raw := range txns2 {
+		id := raw.(map[string]any)["id"].(string)
+		if seen[id] {
+			t.Errorf("duplicate transaction across pages: %s", id)
+		}
+	}
+}
+
+func TestListTransactions_InvalidCursorReturnsError(t *testing.T) {
+	repo := NewMemoryRepository()
+	h := NewHandler(repo, testLogger())
+	router := newTestRouter(h)
+
+	req := httptest.NewRequest(http.MethodGet, "/transactions?user_id=user-1&cursor=not-a-valid-cursor", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp.Error == nil || resp.Error.Code != "INVALID_CURSOR" {
+		t.Errorf("expected INVALID_CURSOR error code, got %+v", resp.Error)
+	}
+}
+
+func TestListTransactions_InvalidLimitReturnsError(t *testing.T) {
+	repo := NewMemoryRepository()
+	h := NewHandler(repo, testLogger())
+	router := newTestRouter(h)
+
+	tests := []struct {
+		name  string
+		limit string
+	}{
+		{"negative", "-1"},
+		{"zero", "0"},
+		{"non-numeric", "abc"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/transactions?user_id=user-1&limit="+tt.limit, nil)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+
+			var resp httpx.Response
+			json.NewDecoder(rec.Body).Decode(&resp)
+			if resp.Error == nil || resp.Error.Code != "INVALID_LIMIT" {
+				t.Errorf("expected INVALID_LIMIT error code, got %+v", resp.Error)
+			}
+		})
+	}
+}
+
+func TestListTransactions_StableOrderWithSameCreatedAt(t *testing.T) {
+	repo := NewMemoryRepository()
+	h := NewHandler(repo, testLogger())
+	router := newTestRouter(h)
+
+	// Insert transactions with the same timestamp directly.
+	now := time.Now().UTC()
+	for _, id := range []string{"txn-c", "txn-a", "txn-b"} {
+		txn := &Transaction{
+			ID: id, UserID: "user-1",
+			Type: TransactionTypeDeposit, Status: StatusPending,
+			Amount: 1000, Currency: "ARS",
+			CreatedAt: now, UpdatedAt: now,
+		}
+		repo.mu.Lock()
+		repo.transactions[id] = txn
+		repo.order = append(repo.order, id)
+		repo.mu.Unlock()
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/transactions?user_id=user-1", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	data := resp.Data.(map[string]any)
+	txns := data["transactions"].([]any)
+
+	// Expect descending ID order: c, b, a.
+	expected := []string{"txn-c", "txn-b", "txn-a"}
+	for i, want := range expected {
+		got := txns[i].(map[string]any)["id"].(string)
+		if got != want {
+			t.Errorf("position %d: got %s, want %s", i, got, want)
+		}
 	}
 }

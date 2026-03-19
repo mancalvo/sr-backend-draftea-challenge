@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
@@ -142,8 +143,8 @@ func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, txn)
 }
 
-// ListTransactions handles GET /transactions?user_id={user_id}.
-// Returns all transactions for a user, ordered by creation time descending.
+// ListTransactions handles GET /transactions?user_id={user_id}&limit={limit}&cursor={cursor}.
+// Returns a cursor-paginated list of transactions for a user, ordered by (created_at DESC, id DESC).
 func (h *Handler) ListTransactions(w http.ResponseWriter, r *http.Request) {
 	userID := r.URL.Query().Get("user_id")
 	if userID == "" {
@@ -151,7 +152,36 @@ func (h *Handler) ListTransactions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txns, err := h.repo.ListTransactionsByUserID(r.Context(), userID)
+	// Parse optional limit.
+	limit := DefaultPageLimit
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			httpx.ErrorWithCode(w, http.StatusBadRequest, "limit must be a positive integer", "INVALID_LIMIT")
+			return
+		}
+		if parsed > MaxPageLimit {
+			parsed = MaxPageLimit
+		}
+		limit = parsed
+	}
+
+	// Parse optional cursor.
+	var cursor *Cursor
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		c, err := DecodeCursor(raw)
+		if err != nil {
+			httpx.ErrorWithCode(w, http.StatusBadRequest, "invalid cursor", "INVALID_CURSOR")
+			return
+		}
+		cursor = c
+	}
+
+	result, err := h.repo.ListTransactionsByUserIDPaginated(r.Context(), ListTransactionsQuery{
+		UserID: userID,
+		Limit:  limit,
+		Cursor: cursor,
+	})
 	if err != nil {
 		logging.FromContext(r.Context()).Error("failed to list transactions", "error", err, "user_id", userID)
 		httpx.Error(w, http.StatusInternalServerError, "internal server error")
@@ -159,12 +189,21 @@ func (h *Handler) ListTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return empty array instead of null.
+	txns := result.Transactions
 	if txns == nil {
 		txns = []Transaction{}
 	}
 
-	httpx.JSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"user_id":      userID,
 		"transactions": txns,
-	})
+		"has_more":     result.HasMore,
+	}
+	if result.NextCursor != nil {
+		resp["next_cursor"] = *result.NextCursor
+	} else {
+		resp["next_cursor"] = nil
+	}
+
+	httpx.JSON(w, http.StatusOK, resp)
 }

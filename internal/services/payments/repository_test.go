@@ -3,6 +3,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -311,5 +312,265 @@ func TestMemoryRepo_UpdateStatus_TimedOutThenCompleted(t *testing.T) {
 	found, _ := repo.GetTransactionByID(ctx, "txn-1")
 	if found.Status != StatusCompleted {
 		t.Errorf("status = %v, want completed", found.Status)
+	}
+}
+
+// --- Paginated listing tests ---
+
+func TestMemoryRepo_ListPaginated_DefaultLimit(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	// Create 3 transactions — fewer than DefaultPageLimit.
+	for i := 0; i < 3; i++ {
+		time.Sleep(time.Millisecond)
+		repo.CreateTransaction(ctx, &Transaction{
+			ID: "txn-" + string(rune('a'+i)), UserID: "user-1",
+			Type: TransactionTypeDeposit, Status: StatusPending,
+			Amount: 1000, Currency: "ARS",
+		})
+	}
+
+	result, err := repo.ListTransactionsByUserIDPaginated(ctx, ListTransactionsQuery{
+		UserID: "user-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Transactions) != 3 {
+		t.Errorf("expected 3 transactions, got %d", len(result.Transactions))
+	}
+	if result.HasMore {
+		t.Error("expected has_more=false")
+	}
+	if result.NextCursor != nil {
+		t.Error("expected next_cursor=nil")
+	}
+}
+
+func TestMemoryRepo_ListPaginated_ExplicitLimit(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		time.Sleep(time.Millisecond)
+		repo.CreateTransaction(ctx, &Transaction{
+			ID: fmt.Sprintf("txn-%d", i), UserID: "user-1",
+			Type: TransactionTypeDeposit, Status: StatusPending,
+			Amount: 1000, Currency: "ARS",
+		})
+	}
+
+	result, err := repo.ListTransactionsByUserIDPaginated(ctx, ListTransactionsQuery{
+		UserID: "user-1",
+		Limit:  2,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Transactions) != 2 {
+		t.Errorf("expected 2 transactions, got %d", len(result.Transactions))
+	}
+	if !result.HasMore {
+		t.Error("expected has_more=true")
+	}
+	if result.NextCursor == nil {
+		t.Fatal("expected next_cursor to be set")
+	}
+}
+
+func TestMemoryRepo_ListPaginated_CursorTraversal(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	// Create 5 transactions with distinct timestamps.
+	for i := 0; i < 5; i++ {
+		time.Sleep(2 * time.Millisecond)
+		repo.CreateTransaction(ctx, &Transaction{
+			ID: fmt.Sprintf("txn-%d", i), UserID: "user-1",
+			Type: TransactionTypeDeposit, Status: StatusPending,
+			Amount: int64(1000 * (i + 1)), Currency: "ARS",
+		})
+	}
+
+	// Page 1: limit 2.
+	page1, err := repo.ListTransactionsByUserIDPaginated(ctx, ListTransactionsQuery{
+		UserID: "user-1",
+		Limit:  2,
+	})
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	if len(page1.Transactions) != 2 {
+		t.Fatalf("page 1: expected 2, got %d", len(page1.Transactions))
+	}
+	if !page1.HasMore {
+		t.Error("page 1: expected has_more=true")
+	}
+	// Most recent first (txn-4, txn-3).
+	if page1.Transactions[0].ID != "txn-4" {
+		t.Errorf("page 1[0] = %s, want txn-4", page1.Transactions[0].ID)
+	}
+	if page1.Transactions[1].ID != "txn-3" {
+		t.Errorf("page 1[1] = %s, want txn-3", page1.Transactions[1].ID)
+	}
+
+	// Page 2: use cursor from page 1.
+	cursor1, err := DecodeCursor(*page1.NextCursor)
+	if err != nil {
+		t.Fatalf("decode cursor: %v", err)
+	}
+	page2, err := repo.ListTransactionsByUserIDPaginated(ctx, ListTransactionsQuery{
+		UserID: "user-1",
+		Limit:  2,
+		Cursor: cursor1,
+	})
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+	if len(page2.Transactions) != 2 {
+		t.Fatalf("page 2: expected 2, got %d", len(page2.Transactions))
+	}
+	if !page2.HasMore {
+		t.Error("page 2: expected has_more=true")
+	}
+	if page2.Transactions[0].ID != "txn-2" {
+		t.Errorf("page 2[0] = %s, want txn-2", page2.Transactions[0].ID)
+	}
+	if page2.Transactions[1].ID != "txn-1" {
+		t.Errorf("page 2[1] = %s, want txn-1", page2.Transactions[1].ID)
+	}
+
+	// Page 3: last page.
+	cursor2, _ := DecodeCursor(*page2.NextCursor)
+	page3, err := repo.ListTransactionsByUserIDPaginated(ctx, ListTransactionsQuery{
+		UserID: "user-1",
+		Limit:  2,
+		Cursor: cursor2,
+	})
+	if err != nil {
+		t.Fatalf("page 3: %v", err)
+	}
+	if len(page3.Transactions) != 1 {
+		t.Fatalf("page 3: expected 1, got %d", len(page3.Transactions))
+	}
+	if page3.HasMore {
+		t.Error("page 3: expected has_more=false")
+	}
+	if page3.NextCursor != nil {
+		t.Error("page 3: expected next_cursor=nil")
+	}
+	if page3.Transactions[0].ID != "txn-0" {
+		t.Errorf("page 3[0] = %s, want txn-0", page3.Transactions[0].ID)
+	}
+
+	// Verify no duplicates across all pages.
+	seen := make(map[string]bool)
+	for _, page := range []*ListTransactionsResult{page1, page2, page3} {
+		for _, txn := range page.Transactions {
+			if seen[txn.ID] {
+				t.Errorf("duplicate transaction: %s", txn.ID)
+			}
+			seen[txn.ID] = true
+		}
+	}
+	if len(seen) != 5 {
+		t.Errorf("expected 5 unique transactions, got %d", len(seen))
+	}
+}
+
+func TestMemoryRepo_ListPaginated_StableOrderSameCreatedAt(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	// Force same created_at by inserting directly into the map.
+	now := time.Now().UTC()
+	for _, id := range []string{"txn-c", "txn-a", "txn-b"} {
+		txn := &Transaction{
+			ID: id, UserID: "user-1",
+			Type: TransactionTypeDeposit, Status: StatusPending,
+			Amount: 1000, Currency: "ARS",
+			CreatedAt: now, UpdatedAt: now,
+		}
+		repo.mu.Lock()
+		repo.transactions[id] = txn
+		repo.order = append(repo.order, id)
+		repo.mu.Unlock()
+	}
+
+	result, err := repo.ListTransactionsByUserIDPaginated(ctx, ListTransactionsQuery{
+		UserID: "user-1",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Transactions) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(result.Transactions))
+	}
+
+	// When created_at is the same, order by ID DESC: c, b, a.
+	expected := []string{"txn-c", "txn-b", "txn-a"}
+	for i, want := range expected {
+		if result.Transactions[i].ID != want {
+			t.Errorf("position %d: got %s, want %s", i, result.Transactions[i].ID, want)
+		}
+	}
+}
+
+func TestMemoryRepo_ListPaginated_CursorWithTiedTimestamps(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	// All share the same timestamp — cursor must use ID as tie-breaker.
+	now := time.Now().UTC()
+	for _, id := range []string{"txn-d", "txn-c", "txn-b", "txn-a"} {
+		txn := &Transaction{
+			ID: id, UserID: "user-1",
+			Type: TransactionTypeDeposit, Status: StatusPending,
+			Amount: 1000, Currency: "ARS",
+			CreatedAt: now, UpdatedAt: now,
+		}
+		repo.mu.Lock()
+		repo.transactions[id] = txn
+		repo.order = append(repo.order, id)
+		repo.mu.Unlock()
+	}
+
+	// Page 1: limit 2 => txn-d, txn-c (DESC by ID).
+	page1, err := repo.ListTransactionsByUserIDPaginated(ctx, ListTransactionsQuery{
+		UserID: "user-1",
+		Limit:  2,
+	})
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	if len(page1.Transactions) != 2 {
+		t.Fatalf("page 1: expected 2, got %d", len(page1.Transactions))
+	}
+	if page1.Transactions[0].ID != "txn-d" || page1.Transactions[1].ID != "txn-c" {
+		t.Errorf("page 1: got [%s, %s], want [txn-d, txn-c]",
+			page1.Transactions[0].ID, page1.Transactions[1].ID)
+	}
+
+	// Page 2: use cursor from page 1 => txn-b, txn-a.
+	cursor, _ := DecodeCursor(*page1.NextCursor)
+	page2, err := repo.ListTransactionsByUserIDPaginated(ctx, ListTransactionsQuery{
+		UserID: "user-1",
+		Limit:  2,
+		Cursor: cursor,
+	})
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+	if len(page2.Transactions) != 2 {
+		t.Fatalf("page 2: expected 2, got %d", len(page2.Transactions))
+	}
+	if page2.Transactions[0].ID != "txn-b" || page2.Transactions[1].ID != "txn-a" {
+		t.Errorf("page 2: got [%s, %s], want [txn-b, txn-a]",
+			page2.Transactions[0].ID, page2.Transactions[1].ID)
+	}
+	if page2.HasMore {
+		t.Error("page 2: expected has_more=false")
 	}
 }
