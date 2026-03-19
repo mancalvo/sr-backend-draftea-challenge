@@ -106,6 +106,46 @@ func TestErrorWithCode(t *testing.T) {
 	}
 }
 
+func TestValidationError(t *testing.T) {
+	w := httptest.NewRecorder()
+
+	fields := []FieldError{
+		{Field: "user_id", Code: "required"},
+		{Field: "amount", Code: "must_be_positive"},
+	}
+	ValidationError(w, fields)
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusUnprocessableEntity)
+	}
+
+	var resp Response
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Success {
+		t.Error("success = true, want false")
+	}
+	if resp.Error == nil {
+		t.Fatal("error should not be nil")
+	}
+	if resp.Error.Code != "VALIDATION_ERROR" {
+		t.Errorf("error.code = %q, want VALIDATION_ERROR", resp.Error.Code)
+	}
+	if resp.Error.Message != "Request validation failed" {
+		t.Errorf("error.message = %q, want 'Request validation failed'", resp.Error.Message)
+	}
+	if len(resp.Error.Fields) != 2 {
+		t.Fatalf("expected 2 field errors, got %d", len(resp.Error.Fields))
+	}
+	if resp.Error.Fields[0].Field != "user_id" || resp.Error.Fields[0].Code != "required" {
+		t.Errorf("field[0] = %+v, want user_id/required", resp.Error.Fields[0])
+	}
+	if resp.Error.Fields[1].Field != "amount" || resp.Error.Fields[1].Code != "must_be_positive" {
+		t.Errorf("field[1] = %+v, want amount/must_be_positive", resp.Error.Fields[1])
+	}
+}
+
 func TestError_InternalServerError(t *testing.T) {
 	w := httptest.NewRecorder()
 

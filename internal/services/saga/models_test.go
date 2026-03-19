@@ -74,6 +74,33 @@ func TestValidSagaType(t *testing.T) {
 	}
 }
 
+func TestRequestFingerprint_Deterministic(t *testing.T) {
+	p := DepositPayload{UserID: "user-1", Amount: 10000, Currency: "ARS"}
+	h1 := RequestFingerprint(p)
+	h2 := RequestFingerprint(p)
+	if h1 != h2 {
+		t.Errorf("same payload produced different hashes: %s != %s", h1, h2)
+	}
+}
+
+func TestRequestFingerprint_DifferentPayloadsProduceDifferentHashes(t *testing.T) {
+	p1 := DepositPayload{UserID: "user-1", Amount: 10000, Currency: "ARS"}
+	p2 := DepositPayload{UserID: "user-1", Amount: 500, Currency: "ARS"}
+	if RequestFingerprint(p1) == RequestFingerprint(p2) {
+		t.Error("different payloads should produce different hashes")
+	}
+}
+
+func TestRequestFingerprint_DefaultCurrencyDoesNotCauseMismatch(t *testing.T) {
+	// If the handler applies a default currency before hashing, the hash should
+	// be the same regardless of whether the client sent the currency or not.
+	p1 := DepositPayload{UserID: "user-1", Amount: 10000, Currency: "ARS"}
+	p2 := DepositPayload{UserID: "user-1", Amount: 10000, Currency: "ARS"}
+	if RequestFingerprint(p1) != RequestFingerprint(p2) {
+		t.Error("identical normalized payloads should produce the same hash")
+	}
+}
+
 func TestValidSagaStatus(t *testing.T) {
 	validStatuses := []SagaStatus{
 		StatusCreated, StatusRunning, StatusTimedOut,

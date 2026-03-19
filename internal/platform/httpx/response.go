@@ -16,8 +16,15 @@ type Response struct {
 
 // ErrorBody is the error detail inside the standard JSON envelope.
 type ErrorBody struct {
-	Message string `json:"message"`
-	Code    string `json:"code,omitempty"`
+	Message string       `json:"message"`
+	Code    string       `json:"code,omitempty"`
+	Fields  []FieldError `json:"fields,omitempty"`
+}
+
+// FieldError describes a single field-level validation failure.
+type FieldError struct {
+	Field string `json:"field"`
+	Code  string `json:"code"`
 }
 
 // JSON writes a JSON response with the given status code.
@@ -50,6 +57,20 @@ func ErrorWithCode(w http.ResponseWriter, status int, message, code string) {
 		},
 	}
 	writeJSON(w, status, resp)
+}
+
+// ValidationError writes a 422 Unprocessable Entity response with field-level
+// validation details. The fields slice must contain at least one entry.
+func ValidationError(w http.ResponseWriter, fields []FieldError) {
+	resp := Response{
+		Success: false,
+		Error: &ErrorBody{
+			Message: "Request validation failed",
+			Code:    "VALIDATION_ERROR",
+			Fields:  fields,
+		},
+	}
+	writeJSON(w, http.StatusUnprocessableEntity, resp)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -18,6 +18,7 @@ var (
 	ErrDuplicateTransaction = errors.New("saga for this transaction already exists")
 	ErrIllegalTransition    = errors.New("illegal saga state transition")
 	ErrIdempotencyKeyExists = errors.New("idempotency key already exists")
+	ErrIdempotencyMismatch  = errors.New("idempotency key already used with a different request payload")
 )
 
 // Repository defines the persistence operations for the saga-orchestrator domain.
@@ -45,8 +46,8 @@ type Repository interface {
 	SaveIdempotencyKey(ctx context.Context, key *IdempotencyKey) error
 
 	// GetIdempotencyKey returns a stored key if it exists and has not expired,
-	// or ErrNotFound.
-	GetIdempotencyKey(ctx context.Context, key string) (*IdempotencyKey, error)
+	// or ErrNotFound. The lookup is scoped by (scope, key).
+	GetIdempotencyKey(ctx context.Context, scope, key string) (*IdempotencyKey, error)
 }
 
 // ---- PostgresRepository ----
@@ -194,10 +195,11 @@ func (r *PostgresRepository) ListTimedOutSagas(ctx context.Context, now time.Tim
 
 func (r *PostgresRepository) SaveIdempotencyKey(ctx context.Context, key *IdempotencyKey) error {
 	const q = `INSERT INTO saga_orchestrator.idempotency_keys
-		(key, transaction_id, response_status, response_body, expires_at)
-		VALUES ($1, $2, $3, $4, $5)`
+		(scope, key, request_hash, transaction_id, response_status, response_body, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`
 	_, err := r.db.ExecContext(ctx, q,
-		key.Key, key.TransactionID, key.ResponseStatus, key.ResponseBody, key.ExpiresAt,
+		key.Scope, key.Key, key.RequestHash,
+		key.TransactionID, key.ResponseStatus, key.ResponseBody, key.ExpiresAt,
 	)
 	if err != nil {
 		if isDuplicateKeyError(err) {
@@ -208,14 +210,15 @@ func (r *PostgresRepository) SaveIdempotencyKey(ctx context.Context, key *Idempo
 	return nil
 }
 
-func (r *PostgresRepository) GetIdempotencyKey(ctx context.Context, key string) (*IdempotencyKey, error) {
-	const q = `SELECT key, transaction_id, response_status, response_body, created_at, expires_at
+func (r *PostgresRepository) GetIdempotencyKey(ctx context.Context, scope, key string) (*IdempotencyKey, error) {
+	const q = `SELECT scope, key, request_hash, transaction_id, response_status, response_body, created_at, expires_at
 		FROM saga_orchestrator.idempotency_keys
-		WHERE key = $1 AND expires_at > now()`
+		WHERE scope = $1 AND key = $2 AND expires_at > now()`
 	var ik IdempotencyKey
 	var body sql.NullString
-	err := r.db.QueryRowContext(ctx, q, key).Scan(
-		&ik.Key, &ik.TransactionID, &ik.ResponseStatus, &body,
+	err := r.db.QueryRowContext(ctx, q, scope, key).Scan(
+		&ik.Scope, &ik.Key, &ik.RequestHash,
+		&ik.TransactionID, &ik.ResponseStatus, &body,
 		&ik.CreatedAt, &ik.ExpiresAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -385,11 +388,16 @@ func (m *MemoryRepository) ListTimedOutSagas(_ context.Context, now time.Time) (
 	return result, nil
 }
 
+func idempotencyMapKey(scope, key string) string {
+	return scope + "\x00" + key
+}
+
 func (m *MemoryRepository) SaveIdempotencyKey(_ context.Context, key *IdempotencyKey) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, exists := m.idempotencyKeys[key.Key]; exists {
+	mk := idempotencyMapKey(key.Scope, key.Key)
+	if _, exists := m.idempotencyKeys[mk]; exists {
 		return ErrIdempotencyKeyExists
 	}
 
@@ -397,15 +405,16 @@ func (m *MemoryRepository) SaveIdempotencyKey(_ context.Context, key *Idempotenc
 	if stored.CreatedAt.IsZero() {
 		stored.CreatedAt = time.Now().UTC()
 	}
-	m.idempotencyKeys[stored.Key] = &stored
+	m.idempotencyKeys[mk] = &stored
 	return nil
 }
 
-func (m *MemoryRepository) GetIdempotencyKey(_ context.Context, key string) (*IdempotencyKey, error) {
+func (m *MemoryRepository) GetIdempotencyKey(_ context.Context, scope, key string) (*IdempotencyKey, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	ik, ok := m.idempotencyKeys[key]
+	mk := idempotencyMapKey(scope, key)
+	ik, ok := m.idempotencyKeys[mk]
 	if !ok {
 		return nil, ErrNotFound
 	}

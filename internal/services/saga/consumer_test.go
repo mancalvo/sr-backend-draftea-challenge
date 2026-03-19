@@ -1415,3 +1415,50 @@ func TestDepositFlow_DuplicateProviderCallbackDedupe(t *testing.T) {
 		t.Errorf("after duplicate: saga status = %s, want completed", final.Status)
 	}
 }
+
+// ---- Status reason cleanup test ----
+
+// TestPurchaseFlow_InsufficientFunds_CleanStatusReason verifies that the status
+// reason for insufficient-funds does not contain the duplicated wording
+// "insufficient funds: insufficient funds".
+func TestPurchaseFlow_InsufficientFunds_CleanStatusReason(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &recordingPaymentsClient{}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-purchase-clean-reason"
+	step := "purchase_debit"
+	createPurchaseSaga(t, repo, txnID, StatusRunning, &step)
+
+	env := newTestEnvelope(t, messaging.RoutingKeyWalletDebitRejected, txnID, messaging.WalletDebitRejected{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        5000,
+		Reason:        "insufficient funds",
+		SourceStep:    "purchase_debit",
+	})
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("handleWalletDebitRejected: %v", err)
+	}
+
+	updates := payments.Updates()
+	if len(updates) != 1 {
+		t.Fatalf("expected 1 status update, got %d", len(updates))
+	}
+	if updates[0].Reason == nil {
+		t.Fatal("expected status reason, got nil")
+	}
+
+	reason := *updates[0].Reason
+	expected := "wallet debit rejected: insufficient funds"
+	if reason != expected {
+		t.Errorf("status_reason = %q, want %q", reason, expected)
+	}
+
+	// Explicitly verify the old duplicated wording is not present.
+	if reason == "insufficient funds: insufficient funds" {
+		t.Error("status_reason still contains the duplicated wording")
+	}
+}

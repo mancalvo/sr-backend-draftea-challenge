@@ -221,6 +221,8 @@ func TestMemoryRepository_IdempotencyKey_SaveAndGet(t *testing.T) {
 
 	ik := &IdempotencyKey{
 		Key:            "test-key",
+		Scope:          "deposit",
+		RequestHash:    "abc123",
 		TransactionID:  "txn-1",
 		ResponseStatus: 202,
 		ResponseBody:   json.RawMessage(`{"success":true}`),
@@ -231,7 +233,7 @@ func TestMemoryRepository_IdempotencyKey_SaveAndGet(t *testing.T) {
 		t.Fatalf("save key: %v", err)
 	}
 
-	got, err := repo.GetIdempotencyKey(ctx, "test-key")
+	got, err := repo.GetIdempotencyKey(ctx, "deposit", "test-key")
 	if err != nil {
 		t.Fatalf("get key: %v", err)
 	}
@@ -241,6 +243,12 @@ func TestMemoryRepository_IdempotencyKey_SaveAndGet(t *testing.T) {
 	if got.ResponseStatus != 202 {
 		t.Errorf("response_status = %d, want 202", got.ResponseStatus)
 	}
+	if got.Scope != "deposit" {
+		t.Errorf("scope = %s, want deposit", got.Scope)
+	}
+	if got.RequestHash != "abc123" {
+		t.Errorf("request_hash = %s, want abc123", got.RequestHash)
+	}
 }
 
 func TestMemoryRepository_IdempotencyKey_Duplicate(t *testing.T) {
@@ -249,6 +257,8 @@ func TestMemoryRepository_IdempotencyKey_Duplicate(t *testing.T) {
 
 	ik := &IdempotencyKey{
 		Key:            "dup-key",
+		Scope:          "deposit",
+		RequestHash:    "hash1",
 		TransactionID:  "txn-1",
 		ResponseStatus: 202,
 		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
@@ -267,6 +277,8 @@ func TestMemoryRepository_IdempotencyKey_Expired(t *testing.T) {
 
 	ik := &IdempotencyKey{
 		Key:            "expired-key",
+		Scope:          "deposit",
+		RequestHash:    "hash1",
 		TransactionID:  "txn-1",
 		ResponseStatus: 202,
 		ExpiresAt:      time.Now().UTC().Add(-1 * time.Hour), // already expired
@@ -274,7 +286,7 @@ func TestMemoryRepository_IdempotencyKey_Expired(t *testing.T) {
 
 	repo.SaveIdempotencyKey(ctx, ik)
 
-	_, err := repo.GetIdempotencyKey(ctx, "expired-key")
+	_, err := repo.GetIdempotencyKey(ctx, "deposit", "expired-key")
 	if err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound for expired key, got %v", err)
 	}
@@ -282,8 +294,63 @@ func TestMemoryRepository_IdempotencyKey_Expired(t *testing.T) {
 
 func TestMemoryRepository_IdempotencyKey_NotFound(t *testing.T) {
 	repo := NewMemoryRepository()
-	_, err := repo.GetIdempotencyKey(context.Background(), "nonexistent")
+	_, err := repo.GetIdempotencyKey(context.Background(), "deposit", "nonexistent")
 	if err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestMemoryRepository_IdempotencyKey_ScopeIsolation(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	// Save a key under "deposit" scope.
+	ik1 := &IdempotencyKey{
+		Key:            "shared-key",
+		Scope:          "deposit",
+		RequestHash:    "hash-deposit",
+		TransactionID:  "txn-1",
+		ResponseStatus: 202,
+		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
+	}
+	if err := repo.SaveIdempotencyKey(ctx, ik1); err != nil {
+		t.Fatalf("save deposit key: %v", err)
+	}
+
+	// Save the same key under "purchase" scope -> should succeed (different scope).
+	ik2 := &IdempotencyKey{
+		Key:            "shared-key",
+		Scope:          "purchase",
+		RequestHash:    "hash-purchase",
+		TransactionID:  "txn-2",
+		ResponseStatus: 202,
+		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
+	}
+	if err := repo.SaveIdempotencyKey(ctx, ik2); err != nil {
+		t.Fatalf("save purchase key: %v", err)
+	}
+
+	// Lookup by deposit scope.
+	got, err := repo.GetIdempotencyKey(ctx, "deposit", "shared-key")
+	if err != nil {
+		t.Fatalf("get deposit key: %v", err)
+	}
+	if got.TransactionID != "txn-1" {
+		t.Errorf("deposit: transaction_id = %s, want txn-1", got.TransactionID)
+	}
+
+	// Lookup by purchase scope.
+	got, err = repo.GetIdempotencyKey(ctx, "purchase", "shared-key")
+	if err != nil {
+		t.Fatalf("get purchase key: %v", err)
+	}
+	if got.TransactionID != "txn-2" {
+		t.Errorf("purchase: transaction_id = %s, want txn-2", got.TransactionID)
+	}
+
+	// Lookup by a scope that was never used -> not found.
+	_, err = repo.GetIdempotencyKey(ctx, "refund", "shared-key")
+	if err != ErrNotFound {
+		t.Fatalf("refund scope: expected ErrNotFound, got %v", err)
 	}
 }

@@ -204,7 +204,7 @@ func (c *ConsumerHandler) handleWalletDebitRejected(ctx context.Context, env mes
 		return fmt.Errorf("update saga to failed: %w", err)
 	}
 
-	reason := fmt.Sprintf("insufficient funds: %s", payload.Reason)
+	reason := fmt.Sprintf("wallet debit rejected: %s", payload.Reason)
 	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason); err != nil {
 		logger.Error("failed to update transaction to failed", "error", err)
 		return fmt.Errorf("update transaction status to failed: %w", err)

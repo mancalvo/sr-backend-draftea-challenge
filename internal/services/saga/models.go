@@ -3,6 +3,8 @@
 package saga
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -111,14 +113,28 @@ type SagaInstance struct {
 }
 
 // IdempotencyKey stores the result of a previously accepted command so that
-// duplicate requests receive the same response.
+// duplicate requests receive the same response. The uniqueness constraint is
+// on (Scope, Key). RequestHash is used to detect payload mismatches.
 type IdempotencyKey struct {
 	Key            string          `json:"key"`
+	Scope          string          `json:"scope"`
+	RequestHash    string          `json:"request_hash"`
 	TransactionID  string          `json:"transaction_id"`
 	ResponseStatus int             `json:"response_status"`
 	ResponseBody   json.RawMessage `json:"response_body,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 	ExpiresAt      time.Time       `json:"expires_at"`
+}
+
+// RequestFingerprint computes a SHA-256 hex digest of the canonical JSON
+// representation of a validated command struct. The struct is marshalled with
+// Go's encoding/json (sorted keys), producing a stable fingerprint that is
+// insensitive to whitespace, field ordering, or default-value differences in
+// the raw request body.
+func RequestFingerprint(cmd any) string {
+	b, _ := json.Marshal(cmd)
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
 }
 
 // ---- Command ingress request types ----

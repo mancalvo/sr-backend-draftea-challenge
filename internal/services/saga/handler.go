@@ -65,8 +65,8 @@ func (h *Handler) HandleDeposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if cmd.UserID == "" || cmd.Amount <= 0 || cmd.IdempotencyKey == "" {
-		httpx.Error(w, http.StatusBadRequest, "user_id, a positive amount, and idempotency_key are required")
+	if fields := validateDepositCommand(&cmd); len(fields) > 0 {
+		httpx.ValidationError(w, fields)
 		return
 	}
 	if cmd.Currency == "" {
@@ -78,8 +78,16 @@ func (h *Handler) HandleDeposit(w http.ResponseWriter, r *http.Request) {
 		slog.String("idempotency_key", cmd.IdempotencyKey),
 	)
 
+	// Compute request fingerprint from the validated, normalized command.
+	scope := string(SagaTypeDeposit)
+	requestHash := RequestFingerprint(DepositPayload{
+		UserID:   cmd.UserID,
+		Amount:   cmd.Amount,
+		Currency: cmd.Currency,
+	})
+
 	// Check idempotency.
-	if cached, err := h.checkIdempotency(r, w, cmd.IdempotencyKey); cached || err != nil {
+	if cached, err := h.checkIdempotency(r, w, scope, cmd.IdempotencyKey, requestHash); cached || err != nil {
 		return
 	}
 
@@ -148,7 +156,7 @@ func (h *Handler) HandleDeposit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save idempotency key.
-	h.saveIdempotencyKey(r.Context(), cmd.IdempotencyKey, transactionID, http.StatusAccepted)
+	h.saveIdempotencyKey(r.Context(), scope, cmd.IdempotencyKey, requestHash, transactionID, http.StatusAccepted)
 
 	httpx.JSON(w, http.StatusAccepted, CommandAcceptedResponse{
 		TransactionID: transactionID,
@@ -165,8 +173,8 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if cmd.UserID == "" || cmd.OfferingID == "" || cmd.Amount <= 0 || cmd.IdempotencyKey == "" {
-		httpx.Error(w, http.StatusBadRequest, "user_id, offering_id, a positive amount, and idempotency_key are required")
+	if fields := validatePurchaseCommand(&cmd); len(fields) > 0 {
+		httpx.ValidationError(w, fields)
 		return
 	}
 	if cmd.Currency == "" {
@@ -179,8 +187,17 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 		slog.String("idempotency_key", cmd.IdempotencyKey),
 	)
 
+	// Compute request fingerprint from the validated, normalized command.
+	scope := string(SagaTypePurchase)
+	requestHash := RequestFingerprint(PurchasePayload{
+		UserID:     cmd.UserID,
+		OfferingID: cmd.OfferingID,
+		Amount:     cmd.Amount,
+		Currency:   cmd.Currency,
+	})
+
 	// Check idempotency.
-	if cached, err := h.checkIdempotency(r, w, cmd.IdempotencyKey); cached || err != nil {
+	if cached, err := h.checkIdempotency(r, w, scope, cmd.IdempotencyKey, requestHash); cached || err != nil {
 		return
 	}
 
@@ -265,7 +282,7 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save idempotency key.
-	h.saveIdempotencyKey(r.Context(), cmd.IdempotencyKey, transactionID, http.StatusAccepted)
+	h.saveIdempotencyKey(r.Context(), scope, cmd.IdempotencyKey, requestHash, transactionID, http.StatusAccepted)
 
 	httpx.JSON(w, http.StatusAccepted, CommandAcceptedResponse{
 		TransactionID: transactionID,
@@ -282,8 +299,8 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if cmd.UserID == "" || cmd.OfferingID == "" || cmd.TransactionID == "" || cmd.Amount <= 0 || cmd.IdempotencyKey == "" {
-		httpx.Error(w, http.StatusBadRequest, "user_id, offering_id, transaction_id, a positive amount, and idempotency_key are required")
+	if fields := validateRefundCommand(&cmd); len(fields) > 0 {
+		httpx.ValidationError(w, fields)
 		return
 	}
 	if cmd.Currency == "" {
@@ -297,8 +314,18 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 		slog.String("idempotency_key", cmd.IdempotencyKey),
 	)
 
+	// Compute request fingerprint from the validated, normalized command.
+	scope := string(SagaTypeRefund)
+	requestHash := RequestFingerprint(RefundPayload{
+		UserID:              cmd.UserID,
+		OfferingID:          cmd.OfferingID,
+		OriginalTransaction: cmd.TransactionID,
+		Amount:              cmd.Amount,
+		Currency:            cmd.Currency,
+	})
+
 	// Check idempotency.
-	if cached, err := h.checkIdempotency(r, w, cmd.IdempotencyKey); cached || err != nil {
+	if cached, err := h.checkIdempotency(r, w, scope, cmd.IdempotencyKey, requestHash); cached || err != nil {
 		return
 	}
 
@@ -382,7 +409,7 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save idempotency key.
-	h.saveIdempotencyKey(r.Context(), cmd.IdempotencyKey, transactionID, http.StatusAccepted)
+	h.saveIdempotencyKey(r.Context(), scope, cmd.IdempotencyKey, requestHash, transactionID, http.StatusAccepted)
 
 	httpx.JSON(w, http.StatusAccepted, CommandAcceptedResponse{
 		TransactionID: transactionID,
@@ -391,18 +418,26 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 }
 
 // checkIdempotency checks if the idempotency key has been seen before.
-// Returns (true, nil) if a cached response was sent. Returns (false, nil) if no
-// cached entry exists and the caller should proceed. Returns (false, error) if
-// there was an internal error (already written to the response writer).
-func (h *Handler) checkIdempotency(r *http.Request, w http.ResponseWriter, key string) (bool, error) {
-	cached, err := h.repo.GetIdempotencyKey(r.Context(), key)
+// Returns (true, nil) if a cached response was sent or a conflict was returned.
+// Returns (false, nil) if no cached entry exists and the caller should proceed.
+// Returns (false, error) if there was an internal error (already written to w).
+func (h *Handler) checkIdempotency(r *http.Request, w http.ResponseWriter, scope, key, requestHash string) (bool, error) {
+	cached, err := h.repo.GetIdempotencyKey(r.Context(), scope, key)
 	if errors.Is(err, ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
-		h.logger.Error("failed to check idempotency key", "error", err, "key", key)
+		h.logger.Error("failed to check idempotency key", "error", err, "key", key, "scope", scope)
 		httpx.Error(w, http.StatusInternalServerError, "internal server error")
 		return false, err
+	}
+
+	// Same scope+key but different payload hash -> conflict.
+	if cached.RequestHash != requestHash {
+		httpx.ErrorWithCode(w, http.StatusConflict,
+			"idempotency key already used with a different request payload",
+			"IDEMPOTENCY_MISMATCH")
+		return true, nil
 	}
 
 	// Replay the cached response.
@@ -415,7 +450,7 @@ func (h *Handler) checkIdempotency(r *http.Request, w http.ResponseWriter, key s
 }
 
 // saveIdempotencyKey stores the accepted response so duplicates get the same result.
-func (h *Handler) saveIdempotencyKey(ctx context.Context, key, transactionID string, status int) {
+func (h *Handler) saveIdempotencyKey(ctx context.Context, scope, key, requestHash, transactionID string, status int) {
 	respBody, _ := json.Marshal(httpx.Response{
 		Success: true,
 		Data: CommandAcceptedResponse{
@@ -426,12 +461,70 @@ func (h *Handler) saveIdempotencyKey(ctx context.Context, key, transactionID str
 
 	ik := &IdempotencyKey{
 		Key:            key,
+		Scope:          scope,
+		RequestHash:    requestHash,
 		TransactionID:  transactionID,
 		ResponseStatus: status,
 		ResponseBody:   respBody,
 		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
 	}
 	if err := h.repo.SaveIdempotencyKey(ctx, ik); err != nil && !errors.Is(err, ErrIdempotencyKeyExists) {
-		h.logger.Error("failed to save idempotency key", "error", err, "key", key)
+		h.logger.Error("failed to save idempotency key", "error", err, "key", key, "scope", scope)
 	}
+}
+
+// ---- Validation helpers ----
+
+// validateDepositCommand returns field-level validation errors for a deposit command.
+func validateDepositCommand(cmd *DepositCommand) []httpx.FieldError {
+	var fields []httpx.FieldError
+	if cmd.UserID == "" {
+		fields = append(fields, httpx.FieldError{Field: "user_id", Code: "required"})
+	}
+	if cmd.Amount <= 0 {
+		fields = append(fields, httpx.FieldError{Field: "amount", Code: "must_be_positive"})
+	}
+	if cmd.IdempotencyKey == "" {
+		fields = append(fields, httpx.FieldError{Field: "idempotency_key", Code: "required"})
+	}
+	return fields
+}
+
+// validatePurchaseCommand returns field-level validation errors for a purchase command.
+func validatePurchaseCommand(cmd *PurchaseCommand) []httpx.FieldError {
+	var fields []httpx.FieldError
+	if cmd.UserID == "" {
+		fields = append(fields, httpx.FieldError{Field: "user_id", Code: "required"})
+	}
+	if cmd.OfferingID == "" {
+		fields = append(fields, httpx.FieldError{Field: "offering_id", Code: "required"})
+	}
+	if cmd.Amount <= 0 {
+		fields = append(fields, httpx.FieldError{Field: "amount", Code: "must_be_positive"})
+	}
+	if cmd.IdempotencyKey == "" {
+		fields = append(fields, httpx.FieldError{Field: "idempotency_key", Code: "required"})
+	}
+	return fields
+}
+
+// validateRefundCommand returns field-level validation errors for a refund command.
+func validateRefundCommand(cmd *RefundCommand) []httpx.FieldError {
+	var fields []httpx.FieldError
+	if cmd.UserID == "" {
+		fields = append(fields, httpx.FieldError{Field: "user_id", Code: "required"})
+	}
+	if cmd.OfferingID == "" {
+		fields = append(fields, httpx.FieldError{Field: "offering_id", Code: "required"})
+	}
+	if cmd.TransactionID == "" {
+		fields = append(fields, httpx.FieldError{Field: "transaction_id", Code: "required"})
+	}
+	if cmd.Amount <= 0 {
+		fields = append(fields, httpx.FieldError{Field: "amount", Code: "must_be_positive"})
+	}
+	if cmd.IdempotencyKey == "" {
+		fields = append(fields, httpx.FieldError{Field: "idempotency_key", Code: "required"})
+	}
+	return fields
 }

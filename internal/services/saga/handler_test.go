@@ -134,8 +134,14 @@ func TestHandleDeposit_MissingFields(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp.Error == nil || resp.Error.Code != "VALIDATION_ERROR" {
+		t.Errorf("expected VALIDATION_ERROR code, got %+v", resp.Error)
 	}
 }
 
@@ -476,8 +482,14 @@ func TestHandleRefund_MissingFields(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp.Error == nil || resp.Error.Code != "VALIDATION_ERROR" {
+		t.Errorf("expected VALIDATION_ERROR code, got %+v", resp.Error)
 	}
 }
 
@@ -754,5 +766,327 @@ func TestPurchaseCreatedSagaHasCorrectPayload(t *testing.T) {
 	}
 	if payload.Amount != 5000 {
 		t.Errorf("payload amount = %d, want 5000", payload.Amount)
+	}
+}
+
+// ---- Idempotency mismatch tests ----
+
+func TestHandleDeposit_IdempotencyMismatch_ReturnsConflict(t *testing.T) {
+	repo := NewMemoryRepository()
+	handler := newTestHandler(repo, &mockCatalogClient{}, &mockPaymentsClient{})
+	router := newTestRouter(handler)
+
+	// First request.
+	body, _ := json.Marshal(DepositCommand{
+		UserID:         "user-1",
+		Amount:         10000,
+		Currency:       "ARS",
+		IdempotencyKey: "dep-mismatch-1",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first: status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+
+	// Second request: same key, different amount.
+	body, _ = json.Marshal(DepositCommand{
+		UserID:         "user-1",
+		Amount:         500,
+		Currency:       "ARS",
+		IdempotencyKey: "dep-mismatch-1",
+	})
+	req = httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("mismatch: status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp.Error == nil || resp.Error.Code != "IDEMPOTENCY_MISMATCH" {
+		t.Errorf("expected IDEMPOTENCY_MISMATCH code, got %+v", resp.Error)
+	}
+}
+
+func TestHandlePurchase_IdempotencyMismatch_ReturnsConflict(t *testing.T) {
+	repo := NewMemoryRepository()
+	catalog := &mockCatalogClient{
+		purchaseResult: &PrecheckResult{Allowed: true},
+	}
+	handler := newTestHandler(repo, catalog, &mockPaymentsClient{})
+	router := newTestRouter(handler)
+
+	// First request.
+	body, _ := json.Marshal(PurchaseCommand{
+		UserID:         "user-1",
+		OfferingID:     "offering-1",
+		Amount:         5000,
+		Currency:       "ARS",
+		IdempotencyKey: "pur-mismatch-1",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first: status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+
+	// Second request: same key, different amount.
+	body, _ = json.Marshal(PurchaseCommand{
+		UserID:         "user-1",
+		OfferingID:     "offering-1",
+		Amount:         999,
+		Currency:       "ARS",
+		IdempotencyKey: "pur-mismatch-1",
+	})
+	req = httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("mismatch: status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
+// TestIdempotencyKey_SameKeyDifferentScopes verifies that the same idempotency
+// key used on different endpoints (scopes) does not collide.
+func TestIdempotencyKey_SameKeyDifferentScopes(t *testing.T) {
+	repo := NewMemoryRepository()
+	catalog := &mockCatalogClient{
+		purchaseResult: &PrecheckResult{Allowed: true},
+		refundResult:   &PrecheckResult{Allowed: true},
+	}
+	handler := newTestHandler(repo, catalog, &mockPaymentsClient{})
+	router := newTestRouter(handler)
+
+	sharedKey := "shared-key-across-scopes"
+
+	// Deposit with the shared key.
+	body, _ := json.Marshal(DepositCommand{
+		UserID:         "user-1",
+		Amount:         10000,
+		Currency:       "ARS",
+		IdempotencyKey: sharedKey,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("deposit: status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+
+	// Purchase with the same key -> should NOT collide with deposit scope.
+	body, _ = json.Marshal(PurchaseCommand{
+		UserID:         "user-1",
+		OfferingID:     "offering-1",
+		Amount:         5000,
+		Currency:       "ARS",
+		IdempotencyKey: sharedKey,
+	})
+	req = httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("purchase: status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+}
+
+// ---- Validation error tests ----
+
+func TestHandleDeposit_MalformedJSON_Returns400(t *testing.T) {
+	repo := NewMemoryRepository()
+	handler := newTestHandler(repo, &mockCatalogClient{}, &mockPaymentsClient{})
+	router := newTestRouter(handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader([]byte(`{bad json`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandleDeposit_MissingUserID_Returns422(t *testing.T) {
+	repo := NewMemoryRepository()
+	handler := newTestHandler(repo, &mockCatalogClient{}, &mockPaymentsClient{})
+	router := newTestRouter(handler)
+
+	body, _ := json.Marshal(DepositCommand{
+		Amount:         10000,
+		IdempotencyKey: "dep-val-1",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp.Error == nil || resp.Error.Code != "VALIDATION_ERROR" {
+		t.Errorf("expected VALIDATION_ERROR, got %+v", resp.Error)
+	}
+	// Verify the field-level detail.
+	found := false
+	for _, f := range resp.Error.Fields {
+		if f.Field == "user_id" && f.Code == "required" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected field error for user_id/required, got %+v", resp.Error.Fields)
+	}
+}
+
+func TestHandleDeposit_MissingIdempotencyKey_Returns422(t *testing.T) {
+	repo := NewMemoryRepository()
+	handler := newTestHandler(repo, &mockCatalogClient{}, &mockPaymentsClient{})
+	router := newTestRouter(handler)
+
+	body, _ := json.Marshal(DepositCommand{
+		UserID: "user-1",
+		Amount: 10000,
+		// Missing idempotency_key
+	})
+	req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	found := false
+	for _, f := range resp.Error.Fields {
+		if f.Field == "idempotency_key" && f.Code == "required" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected field error for idempotency_key/required, got %+v", resp.Error.Fields)
+	}
+}
+
+func TestHandleDeposit_NonPositiveAmount_Returns422(t *testing.T) {
+	repo := NewMemoryRepository()
+	handler := newTestHandler(repo, &mockCatalogClient{}, &mockPaymentsClient{})
+	router := newTestRouter(handler)
+
+	body, _ := json.Marshal(DepositCommand{
+		UserID:         "user-1",
+		Amount:         -100,
+		IdempotencyKey: "dep-neg-1",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	found := false
+	for _, f := range resp.Error.Fields {
+		if f.Field == "amount" && f.Code == "must_be_positive" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected field error for amount/must_be_positive, got %+v", resp.Error.Fields)
+	}
+}
+
+func TestHandlePurchase_MissingOfferingID_Returns422(t *testing.T) {
+	repo := NewMemoryRepository()
+	catalog := &mockCatalogClient{
+		purchaseResult: &PrecheckResult{Allowed: true},
+	}
+	handler := newTestHandler(repo, catalog, &mockPaymentsClient{})
+	router := newTestRouter(handler)
+
+	body, _ := json.Marshal(PurchaseCommand{
+		UserID:         "user-1",
+		Amount:         5000,
+		IdempotencyKey: "pur-val-1",
+		// Missing offering_id
+	})
+	req := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	found := false
+	for _, f := range resp.Error.Fields {
+		if f.Field == "offering_id" && f.Code == "required" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected field error for offering_id/required, got %+v", resp.Error.Fields)
+	}
+}
+
+func TestHandleRefund_MissingTransactionID_Returns422(t *testing.T) {
+	repo := NewMemoryRepository()
+	handler := newTestHandler(repo, &mockCatalogClient{}, &mockPaymentsClient{})
+	router := newTestRouter(handler)
+
+	body, _ := json.Marshal(RefundCommand{
+		UserID:         "user-1",
+		OfferingID:     "offering-1",
+		Amount:         5000,
+		IdempotencyKey: "ref-val-1",
+		// Missing transaction_id
+	})
+	req := httptest.NewRequest(http.MethodPost, "/refunds", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	found := false
+	for _, f := range resp.Error.Fields {
+		if f.Field == "transaction_id" && f.Code == "required" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected field error for transaction_id/required, got %+v", resp.Error.Fields)
 	}
 }
