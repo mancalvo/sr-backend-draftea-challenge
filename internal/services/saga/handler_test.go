@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 )
 
 func testLogger() *slog.Logger {
@@ -477,6 +478,109 @@ func TestHandleRefund_MissingFields(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+// ---- POST /refunds workflow initiation ----
+
+// TestHandleRefund_InitiatesWorkflow verifies that HandleRefund transitions the
+// saga to running and publishes access.revoke.requested.
+func TestHandleRefund_InitiatesWorkflow(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	catalog := &mockCatalogClient{
+		refundResult: &PrecheckResult{Allowed: true},
+	}
+	payments := &mockPaymentsClient{}
+	h := NewHandler(repo, catalog, payments, pub, 30*time.Second, testLogger())
+	router := newTestRouter(h)
+
+	body, _ := json.Marshal(RefundCommand{
+		UserID:         "user-1",
+		OfferingID:     "offering-1",
+		TransactionID:  "orig-purchase-txn",
+		Amount:         5000,
+		Currency:       "ARS",
+		IdempotencyKey: "ref-init-1",
+	})
+
+	req := httptest.NewRequest("POST", "/refunds", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != 202 {
+		t.Fatalf("status = %d, want 202; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Extract transaction ID from response.
+	var resp struct {
+		Data struct {
+			TransactionID string `json:"transaction_id"`
+		} `json:"data"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp)
+	txnID := resp.Data.TransactionID
+	if txnID == "" {
+		t.Fatal("empty transaction_id in response")
+	}
+
+	// Verify saga was created and transitioned to running.
+	s, err := repo.GetSagaByTransactionID(context.Background(), txnID)
+	if err != nil {
+		t.Fatalf("get saga: %v", err)
+	}
+	if s.Status != StatusRunning {
+		t.Errorf("saga status = %s, want running", s.Status)
+	}
+	if s.CurrentStep == nil || *s.CurrentStep != "refund_revoke_access" {
+		t.Errorf("current_step = %v, want refund_revoke_access", s.CurrentStep)
+	}
+	if s.Type != SagaTypeRefund {
+		t.Errorf("saga type = %s, want refund", s.Type)
+	}
+
+	// Verify access.revoke.requested was published.
+	msgs := pub.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 published message, got %d", len(msgs))
+	}
+	if msgs[0].RoutingKey != messaging.RoutingKeyAccessRevokeRequested {
+		t.Errorf("routing key = %s, want %s", msgs[0].RoutingKey, messaging.RoutingKeyAccessRevokeRequested)
+	}
+	if msgs[0].Exchange != messaging.ExchangeCommands {
+		t.Errorf("exchange = %s, want %s", msgs[0].Exchange, messaging.ExchangeCommands)
+	}
+
+	revokePayload, ok := msgs[0].Payload.(messaging.AccessRevokeRequested)
+	if !ok {
+		t.Fatalf("expected AccessRevokeRequested payload, got %T", msgs[0].Payload)
+	}
+	// The TransactionID in the revoke request should be the original purchase txn.
+	if revokePayload.TransactionID != "orig-purchase-txn" {
+		t.Errorf("revoke transaction_id = %s, want orig-purchase-txn", revokePayload.TransactionID)
+	}
+	if revokePayload.UserID != "user-1" {
+		t.Errorf("revoke user_id = %s, want user-1", revokePayload.UserID)
+	}
+	if revokePayload.OfferingID != "offering-1" {
+		t.Errorf("revoke offering_id = %s, want offering-1", revokePayload.OfferingID)
+	}
+	// The correlationID should be the refund transaction ID.
+	if msgs[0].CorrelationID != txnID {
+		t.Errorf("correlation_id = %s, want %s", msgs[0].CorrelationID, txnID)
+	}
+
+	// Verify refund payload stored correctly.
+	var refPayload RefundPayload
+	if err := json.Unmarshal(s.Payload, &refPayload); err != nil {
+		t.Fatalf("unmarshal refund payload: %v", err)
+	}
+	if refPayload.OriginalTransaction != "orig-purchase-txn" {
+		t.Errorf("original_transaction = %s, want orig-purchase-txn", refPayload.OriginalTransaction)
+	}
+	if refPayload.Amount != 5000 {
+		t.Errorf("amount = %d, want 5000", refPayload.Amount)
 	}
 }
 

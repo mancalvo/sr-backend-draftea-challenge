@@ -334,6 +334,29 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 
 	logger.Info("refund saga created", "saga_id", sagaInstance.ID)
 
+	// Step 4: Transition saga to running and publish access.revoke.requested.
+	step := "refund_revoke_access"
+	if _, err := h.repo.UpdateSagaStatus(r.Context(), sagaInstance.ID, StatusRunning, nil, &step); err != nil {
+		logger.Error("failed to transition saga to running", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	if err := h.publisher.Publish(r.Context(),
+		messaging.ExchangeCommands,
+		messaging.RoutingKeyAccessRevokeRequested,
+		transactionID, // refund transaction ID as correlation
+		messaging.AccessRevokeRequested{
+			TransactionID: cmd.TransactionID, // original purchase transaction ID for DB lookup
+			UserID:        cmd.UserID,
+			OfferingID:    cmd.OfferingID,
+		},
+	); err != nil {
+		logger.Error("failed to publish access.revoke.requested", "error", err)
+		// Saga is already running but command was not sent. The timeout poller
+		// will eventually handle this. We still return 202 since the saga exists.
+	}
+
 	// Save idempotency key.
 	h.saveIdempotencyKey(r.Context(), cmd.IdempotencyKey, transactionID, http.StatusAccepted)
 

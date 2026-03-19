@@ -91,6 +91,15 @@ func decodePurchasePayload(s *SagaInstance) (*PurchasePayload, error) {
 	return &p, nil
 }
 
+// decodeRefundPayload extracts RefundPayload from a saga's stored payload.
+func decodeRefundPayload(s *SagaInstance) (*RefundPayload, error) {
+	var p RefundPayload
+	if err := json.Unmarshal(s.Payload, &p); err != nil {
+		return nil, fmt.Errorf("decode refund payload: %w", err)
+	}
+	return &p, nil
+}
+
 // isSagaTerminal returns true if the saga is already in a terminal state
 // (completed, failed, reconciliation_required). Used to handle duplicate
 // event redelivery gracefully.
@@ -238,7 +247,27 @@ func (c *ConsumerHandler) handleWalletCredited(ctx context.Context, env messagin
 		return nil
 	}
 
-	// Other saga types (refund) will handle wallet.credited in T10/T11.
+	// For refund sagas in running status: credit completes the refund successfully.
+	if s.Type == SagaTypeRefund && s.Status == StatusRunning {
+		outcome := OutcomeSucceeded
+		step := "refund_completed"
+		if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusCompleted, &outcome, &step); err != nil {
+			if errors.Is(err, ErrIllegalTransition) {
+				logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
+				return nil
+			}
+			return fmt.Errorf("update saga to completed (refund): %w", err)
+		}
+
+		if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil); err != nil {
+			logger.Error("failed to update transaction to completed", "error", err)
+			return fmt.Errorf("update transaction status to completed: %w", err)
+		}
+
+		logger.Info("refund saga completed successfully", "saga_id", s.ID)
+		return nil
+	}
+
 	return nil
 }
 
@@ -349,14 +378,56 @@ func (c *ConsumerHandler) handleAccessRevoked(ctx context.Context, env messaging
 	if err := env.DecodePayload(&payload); err != nil {
 		return fmt.Errorf("decode access.revoked payload: %w", err)
 	}
-	logger = logger.With(slog.String(logging.KeyTransactionID, payload.TransactionID))
 
-	saga, err := c.lookupSaga(ctx, payload.TransactionID, logger)
+	// For refund workflows, payload.TransactionID is the original purchase transaction,
+	// but env.CorrelationID is the refund transaction. Use the correlation ID
+	// to look up the refund saga.
+	sagaTxnID := env.CorrelationID
+	logger = logger.With(
+		slog.String(logging.KeyTransactionID, sagaTxnID),
+		slog.String("original_transaction_id", payload.TransactionID),
+	)
+
+	s, err := c.lookupSaga(ctx, sagaTxnID, logger)
 	if err != nil {
 		return err
 	}
 
-	logger.Info("received access.revoked", "saga_id", saga.ID, "saga_status", string(saga.Status))
+	logger.Info("received access.revoked", "saga_id", s.ID, "saga_status", string(s.Status))
+
+	// Idempotent: already terminal, nothing to do.
+	if isSagaTerminal(s) {
+		logger.Info("saga already terminal, ignoring duplicate access.revoked")
+		return nil
+	}
+
+	if s.Type != SagaTypeRefund {
+		return nil
+	}
+
+	refundPayload, err := decodeRefundPayload(s)
+	if err != nil {
+		return err
+	}
+
+	// Access revoked successfully -> publish wallet.credit.requested to refund the user.
+	// The saga stays at StatusRunning; final step update occurs when the saga completes.
+	if err := c.publisher.Publish(ctx,
+		messaging.ExchangeCommands,
+		messaging.RoutingKeyWalletCreditRequested,
+		s.TransactionID,
+		messaging.WalletCreditRequested{
+			TransactionID: s.TransactionID,
+			UserID:        refundPayload.UserID,
+			Amount:        refundPayload.Amount,
+			Currency:      refundPayload.Currency,
+			SourceStep:    "refund_credit",
+		},
+	); err != nil {
+		return fmt.Errorf("publish wallet.credit.requested for refund: %w", err)
+	}
+
+	logger.Info("published wallet.credit.requested for refund", "saga_id", s.ID)
 	return nil
 }
 
@@ -365,14 +436,50 @@ func (c *ConsumerHandler) handleAccessRevokeRejected(ctx context.Context, env me
 	if err := env.DecodePayload(&payload); err != nil {
 		return fmt.Errorf("decode access.revoke.rejected payload: %w", err)
 	}
-	logger = logger.With(slog.String(logging.KeyTransactionID, payload.TransactionID))
 
-	saga, err := c.lookupSaga(ctx, payload.TransactionID, logger)
+	// For refund workflows, use env.CorrelationID (refund txn) to find the saga.
+	sagaTxnID := env.CorrelationID
+	logger = logger.With(
+		slog.String(logging.KeyTransactionID, sagaTxnID),
+		slog.String("original_transaction_id", payload.TransactionID),
+	)
+
+	s, err := c.lookupSaga(ctx, sagaTxnID, logger)
 	if err != nil {
 		return err
 	}
 
-	logger.Info("received access.revoke.rejected", "saga_id", saga.ID, "reason", payload.Reason)
+	logger.Info("received access.revoke.rejected", "saga_id", s.ID, "reason", payload.Reason)
+
+	// Idempotent: already terminal, nothing to do.
+	if isSagaTerminal(s) {
+		logger.Info("saga already terminal, ignoring duplicate access.revoke.rejected")
+		return nil
+	}
+
+	if s.Type != SagaTypeRefund {
+		return nil
+	}
+
+	// Revoke rejected (access already inactive) -> fail the saga and the transaction.
+	// Do not credit the wallet since revoke did not succeed.
+	outcome := OutcomeFailed
+	step := "refund_revoke_rejected"
+	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusFailed, &outcome, &step); err != nil {
+		if errors.Is(err, ErrIllegalTransition) {
+			logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
+			return nil
+		}
+		return fmt.Errorf("update saga to failed: %w", err)
+	}
+
+	reason := fmt.Sprintf("access revoke rejected: %s", payload.Reason)
+	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason); err != nil {
+		logger.Error("failed to update transaction to failed", "error", err)
+		return fmt.Errorf("update transaction status to failed: %w", err)
+	}
+
+	logger.Info("refund saga failed due to revoke rejection", "saga_id", s.ID)
 	return nil
 }
 

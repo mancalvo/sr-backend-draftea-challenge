@@ -696,3 +696,348 @@ func TestPurchaseFlow_HandlerPurchaseInitiatesWorkflow(t *testing.T) {
 		t.Errorf("debit source_step = %s, want purchase_debit", debitPayload.SourceStep)
 	}
 }
+
+// ---- Refund flow helpers ----
+
+// createRefundSaga sets up a refund saga in the given repo at the specified status/step.
+func createRefundSaga(t *testing.T, repo *MemoryRepository, transactionID string, status SagaStatus, step *string) *SagaInstance {
+	t.Helper()
+	payload, _ := json.Marshal(RefundPayload{
+		UserID:              "user-1",
+		OfferingID:          "offering-1",
+		OriginalTransaction: "orig-purchase-txn",
+		Amount:              5000,
+		Currency:            "ARS",
+	})
+	timeout := time.Now().UTC().Add(30 * time.Second)
+	s, err := repo.CreateSaga(context.Background(), &SagaInstance{
+		TransactionID: transactionID,
+		Type:          SagaTypeRefund,
+		Status:        StatusCreated,
+		Payload:       payload,
+		TimeoutAt:     &timeout,
+	})
+	if err != nil {
+		t.Fatalf("create saga: %v", err)
+	}
+
+	// Advance to target status if needed.
+	if status != StatusCreated {
+		s, err = repo.UpdateSagaStatus(context.Background(), s.ID, StatusRunning, nil, step)
+		if err != nil {
+			t.Fatalf("transition to running: %v", err)
+		}
+		if status != StatusRunning {
+			s, err = repo.UpdateSagaStatus(context.Background(), s.ID, status, nil, step)
+			if err != nil {
+				t.Fatalf("transition to %s: %v", status, err)
+			}
+		}
+	}
+	return s
+}
+
+// failingPaymentsClient fails the first N UpdateTransactionStatus calls, then succeeds.
+type failingPaymentsClient struct {
+	mu           sync.Mutex
+	failCount    int
+	callCount    int
+	updates      []statusUpdate
+	registerResp *RegisterTransactionResponse
+}
+
+func (c *failingPaymentsClient) RegisterTransaction(_ context.Context, req RegisterTransactionRequest) (*RegisterTransactionResponse, error) {
+	if c.registerResp != nil {
+		return c.registerResp, nil
+	}
+	return &RegisterTransactionResponse{ID: req.ID, Status: "pending"}, nil
+}
+
+func (c *failingPaymentsClient) UpdateTransactionStatus(_ context.Context, transactionID string, status string, reason *string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.callCount++
+	if c.callCount <= c.failCount {
+		return fmt.Errorf("temporary failure (call %d/%d)", c.callCount, c.failCount)
+	}
+	c.updates = append(c.updates, statusUpdate{
+		TransactionID: transactionID,
+		Status:        status,
+		Reason:        reason,
+	})
+	return nil
+}
+
+func (c *failingPaymentsClient) Updates() []statusUpdate {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	result := make([]statusUpdate, len(c.updates))
+	copy(result, c.updates)
+	return result
+}
+
+// ---- Refund flow tests ----
+
+func TestRefundFlow_HappyPath(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &recordingPaymentsClient{}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-refund-happy"
+	step := "refund_revoke_access"
+	s := createRefundSaga(t, repo, txnID, StatusRunning, &step)
+
+	// Step 1: access.revoked -> should publish wallet.credit.requested.
+	// Note: TransactionID in the payload is the original purchase txn,
+	// but CorrelationID is the refund txn ID.
+	env := newTestEnvelope(t, messaging.RoutingKeyAccessRevoked, txnID, messaging.AccessRevoked{
+		TransactionID: "orig-purchase-txn",
+		UserID:        "user-1",
+		OfferingID:    "offering-1",
+	})
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("handleAccessRevoked: %v", err)
+	}
+
+	// Verify wallet.credit.requested was published.
+	msgs := pub.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 published message, got %d", len(msgs))
+	}
+	if msgs[0].RoutingKey != messaging.RoutingKeyWalletCreditRequested {
+		t.Errorf("routing key = %s, want %s", msgs[0].RoutingKey, messaging.RoutingKeyWalletCreditRequested)
+	}
+	if msgs[0].Exchange != messaging.ExchangeCommands {
+		t.Errorf("exchange = %s, want %s", msgs[0].Exchange, messaging.ExchangeCommands)
+	}
+
+	// Verify the credit payload.
+	creditPayload, ok := msgs[0].Payload.(messaging.WalletCreditRequested)
+	if !ok {
+		t.Fatalf("expected WalletCreditRequested payload, got %T", msgs[0].Payload)
+	}
+	if creditPayload.TransactionID != txnID {
+		t.Errorf("credit transaction_id = %s, want %s", creditPayload.TransactionID, txnID)
+	}
+	if creditPayload.UserID != "user-1" {
+		t.Errorf("credit user_id = %s, want user-1", creditPayload.UserID)
+	}
+	if creditPayload.Amount != 5000 {
+		t.Errorf("credit amount = %d, want 5000", creditPayload.Amount)
+	}
+	if creditPayload.SourceStep != "refund_credit" {
+		t.Errorf("credit source_step = %s, want refund_credit", creditPayload.SourceStep)
+	}
+
+	// Verify saga is still running (step update happens on final transition).
+	updated, _ := repo.GetSagaByID(ctx, s.ID)
+	if updated.Status != StatusRunning {
+		t.Errorf("saga status = %s, want running", updated.Status)
+	}
+
+	// Step 2: wallet.credited -> should complete the refund saga.
+	env = newTestEnvelope(t, messaging.RoutingKeyWalletCredited, txnID, messaging.WalletCredited{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        5000,
+		BalanceAfter:  25000,
+		SourceStep:    "refund_credit",
+	})
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("handleWalletCredited: %v", err)
+	}
+
+	// Verify saga is completed with succeeded outcome.
+	final, _ := repo.GetSagaByID(ctx, s.ID)
+	if final.Status != StatusCompleted {
+		t.Errorf("saga status = %s, want completed", final.Status)
+	}
+	if final.Outcome == nil || *final.Outcome != OutcomeSucceeded {
+		t.Errorf("saga outcome = %v, want succeeded", final.Outcome)
+	}
+	if final.CurrentStep == nil || *final.CurrentStep != "refund_completed" {
+		t.Errorf("current_step = %v, want refund_completed", final.CurrentStep)
+	}
+
+	// Verify transaction was marked completed.
+	updates := payments.Updates()
+	if len(updates) != 1 {
+		t.Fatalf("expected 1 status update, got %d", len(updates))
+	}
+	if updates[0].TransactionID != txnID {
+		t.Errorf("transaction_id = %s, want %s", updates[0].TransactionID, txnID)
+	}
+	if updates[0].Status != "completed" {
+		t.Errorf("status = %s, want completed", updates[0].Status)
+	}
+}
+
+func TestRefundFlow_RevokeRejectedAccessInactive(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &recordingPaymentsClient{}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-refund-revoke-rej"
+	step := "refund_revoke_access"
+	s := createRefundSaga(t, repo, txnID, StatusRunning, &step)
+
+	// access.revoke.rejected because access is already inactive.
+	env := newTestEnvelope(t, messaging.RoutingKeyAccessRevokeRejected, txnID, messaging.AccessRevokeRejected{
+		TransactionID: "orig-purchase-txn",
+		UserID:        "user-1",
+		OfferingID:    "offering-1",
+		Reason:        "no active access found for this transaction",
+	})
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("handleAccessRevokeRejected: %v", err)
+	}
+
+	// Verify saga is failed.
+	final, _ := repo.GetSagaByID(ctx, s.ID)
+	if final.Status != StatusFailed {
+		t.Errorf("saga status = %s, want failed", final.Status)
+	}
+	if final.Outcome == nil || *final.Outcome != OutcomeFailed {
+		t.Errorf("saga outcome = %v, want failed", final.Outcome)
+	}
+	if final.CurrentStep == nil || *final.CurrentStep != "refund_revoke_rejected" {
+		t.Errorf("current_step = %v, want refund_revoke_rejected", final.CurrentStep)
+	}
+
+	// Verify transaction was marked failed.
+	updates := payments.Updates()
+	if len(updates) != 1 {
+		t.Fatalf("expected 1 status update, got %d", len(updates))
+	}
+	if updates[0].Status != "failed" {
+		t.Errorf("status = %s, want failed", updates[0].Status)
+	}
+	if updates[0].Reason == nil {
+		t.Fatal("expected status reason, got nil")
+	}
+
+	// No credit commands should have been published.
+	if len(pub.Messages()) != 0 {
+		t.Errorf("expected no published messages, got %d", len(pub.Messages()))
+	}
+}
+
+func TestRefundFlow_DuplicateRevokeEventHandling(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &recordingPaymentsClient{}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-refund-dup-revoke"
+	step := "refund_revoke_access"
+	s := createRefundSaga(t, repo, txnID, StatusRunning, &step)
+
+	// First delivery of access.revoked -> should publish wallet.credit.requested.
+	env := newTestEnvelope(t, messaging.RoutingKeyAccessRevoked, txnID, messaging.AccessRevoked{
+		TransactionID: "orig-purchase-txn",
+		UserID:        "user-1",
+		OfferingID:    "offering-1",
+	})
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("first handleAccessRevoked: %v", err)
+	}
+
+	if len(pub.Messages()) != 1 {
+		t.Fatalf("expected 1 message after first delivery, got %d", len(pub.Messages()))
+	}
+
+	// Second delivery (duplicate) of access.revoked -> should not error.
+	// The saga is still running (at refund_credit step), so the UpdateSagaStatus
+	// running->running is a no-op transition that may be rejected.
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("second handleAccessRevoked: %v", err)
+	}
+
+	// Saga should still be running.
+	updated, _ := repo.GetSagaByID(ctx, s.ID)
+	if updated.Status != StatusRunning {
+		t.Errorf("saga status = %s, want running", updated.Status)
+	}
+
+	// Now complete the saga via wallet.credited.
+	creditEnv := newTestEnvelope(t, messaging.RoutingKeyWalletCredited, txnID, messaging.WalletCredited{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        5000,
+		BalanceAfter:  25000,
+		SourceStep:    "refund_credit",
+	})
+	if err := handler.HandleOutcome(ctx, creditEnv); err != nil {
+		t.Fatalf("handleWalletCredited: %v", err)
+	}
+
+	final, _ := repo.GetSagaByID(ctx, s.ID)
+	if final.Status != StatusCompleted {
+		t.Errorf("saga status = %s, want completed", final.Status)
+	}
+
+	// Deliver access.revoked again after completion -> should be silently ignored.
+	if err := handler.HandleOutcome(ctx, env); err != nil {
+		t.Fatalf("third handleAccessRevoked (after completion): %v", err)
+	}
+
+	final, _ = repo.GetSagaByID(ctx, s.ID)
+	if final.Status != StatusCompleted {
+		t.Errorf("after duplicate on completed saga: status = %s, want completed", final.Status)
+	}
+}
+
+func TestRefundFlow_RetryPathFinalStatusUpdateFails(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &failingPaymentsClient{failCount: 1}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-refund-retry"
+	step := "refund_credit"
+	s := createRefundSaga(t, repo, txnID, StatusRunning, &step)
+
+	// wallet.credited arrives but the final status update fails on first attempt.
+	env := newTestEnvelope(t, messaging.RoutingKeyWalletCredited, txnID, messaging.WalletCredited{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        5000,
+		BalanceAfter:  25000,
+		SourceStep:    "refund_credit",
+	})
+
+	// First attempt: should return an error (payments client fails).
+	err := handler.HandleOutcome(ctx, env)
+	if err == nil {
+		t.Fatal("expected error on first attempt when payments client fails")
+	}
+
+	// The saga should have been transitioned to completed already (saga update
+	// succeeded, but the transaction status update failed, causing a returned error
+	// that triggers retry at the consumer level).
+	mid, _ := repo.GetSagaByID(ctx, s.ID)
+	if mid.Status != StatusCompleted {
+		t.Errorf("saga status = %s, want completed (saga transitions before payment update)", mid.Status)
+	}
+
+	// Second attempt (retry): the saga is terminal so it should be handled idempotently.
+	err = handler.HandleOutcome(ctx, env)
+	if err != nil {
+		t.Fatalf("expected nil on retry (saga terminal), got: %v", err)
+	}
+
+	// Verify saga remains completed.
+	final, _ := repo.GetSagaByID(ctx, s.ID)
+	if final.Status != StatusCompleted {
+		t.Errorf("saga status = %s, want completed", final.Status)
+	}
+	if final.Outcome == nil || *final.Outcome != OutcomeSucceeded {
+		t.Errorf("saga outcome = %v, want succeeded", final.Outcome)
+	}
+}
