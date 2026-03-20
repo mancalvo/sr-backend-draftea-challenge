@@ -1,6 +1,4 @@
-// Package catalogaccess implements the catalog-access service: users, offerings,
-// access records, purchase/refund prechecks, and access grant/revoke logic.
-package catalogaccess
+package domain
 
 import "time"
 
@@ -52,25 +50,4 @@ type Entitlement struct {
 	OfferingName  string    `json:"offering_name"`
 	TransactionID string    `json:"transaction_id"`
 	GrantedAt     time.Time `json:"granted_at"`
-}
-
-// PurchasePrecheckRequest is the body for POST /internal/purchase-precheck.
-type PurchasePrecheckRequest struct {
-	UserID     string `json:"user_id"`
-	OfferingID string `json:"offering_id"`
-}
-
-// RefundPrecheckRequest is the body for POST /internal/refund-precheck.
-type RefundPrecheckRequest struct {
-	UserID        string `json:"user_id"`
-	OfferingID    string `json:"offering_id"`
-	TransactionID string `json:"transaction_id"`
-}
-
-// PrecheckResult carries the result of a precheck.
-type PrecheckResult struct {
-	Allowed  bool   `json:"allowed"`
-	Reason   string `json:"reason,omitempty"`
-	Price    int64  `json:"price,omitempty"`
-	Currency string `json:"currency,omitempty"`
 }

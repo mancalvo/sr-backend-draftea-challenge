@@ -1,4 +1,4 @@
-package catalogaccess
+package consumer
 
 import (
 	"context"
@@ -8,6 +8,9 @@ import (
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/repository"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/service"
 )
 
 // Publisher defines the subset of publishing operations needed by consumers.
@@ -15,22 +18,22 @@ type Publisher interface {
 	Publish(ctx context.Context, exchange, routingKey, correlationID string, payload any) error
 }
 
-// ConsumerHandler provides AMQP message handlers for catalog-access commands.
-type ConsumerHandler struct {
-	repo      Repository
+// Handler provides AMQP message handlers for catalog-access commands.
+type Handler struct {
+	service   *service.Service
 	publisher Publisher
 	logger    *slog.Logger
 }
 
-// NewConsumerHandler creates a new ConsumerHandler.
-func NewConsumerHandler(repo Repository, publisher Publisher, logger *slog.Logger) *ConsumerHandler {
-	return &ConsumerHandler{repo: repo, publisher: publisher, logger: logger}
+// NewHandler creates a new consumer handler.
+func NewHandler(service *service.Service, publisher Publisher, logger *slog.Logger) *Handler {
+	return &Handler{service: service, publisher: publisher, logger: logger}
 }
 
 // HandleAccessGrantRequested processes an access.grant.requested command.
 // It grants access to the specified offering for the user, publishing
 // either access.granted or access.grant.conflicted as the outcome.
-func (c *ConsumerHandler) HandleAccessGrantRequested(ctx context.Context, env messaging.Envelope) error {
+func (c *Handler) HandleAccessGrantRequested(ctx context.Context, env messaging.Envelope) error {
 	var cmd messaging.AccessGrantRequested
 	if err := env.DecodePayload(&cmd); err != nil {
 		return fmt.Errorf("decode access.grant.requested: %w", err)
@@ -46,9 +49,9 @@ func (c *ConsumerHandler) HandleAccessGrantRequested(ctx context.Context, env me
 
 	logger.Info("processing access grant request")
 
-	_, err := c.repo.GrantAccess(ctx, cmd.UserID, cmd.OfferingID, cmd.TransactionID)
-	if errors.Is(err, ErrDuplicateAccess) {
-		existing, lookupErr := c.repo.GetActiveAccess(ctx, cmd.UserID, cmd.OfferingID)
+	_, err := c.service.GrantAccess(ctx, cmd.UserID, cmd.OfferingID, cmd.TransactionID)
+	if errors.Is(err, repository.ErrDuplicateAccess) {
+		existing, lookupErr := c.service.GetActiveAccess(ctx, cmd.UserID, cmd.OfferingID)
 		if lookupErr != nil {
 			logger.Error("failed to load existing access after duplicate grant", "error", lookupErr)
 			return fmt.Errorf("lookup existing access after duplicate grant: %w", lookupErr)
@@ -102,7 +105,7 @@ func (c *ConsumerHandler) HandleAccessGrantRequested(ctx context.Context, env me
 // HandleAccessRevokeRequested processes an access.revoke.requested command.
 // It revokes the active access linked to the transaction, publishing
 // either access.revoked or access.revoke.rejected as the outcome.
-func (c *ConsumerHandler) HandleAccessRevokeRequested(ctx context.Context, env messaging.Envelope) error {
+func (c *Handler) HandleAccessRevokeRequested(ctx context.Context, env messaging.Envelope) error {
 	var cmd messaging.AccessRevokeRequested
 	if err := env.DecodePayload(&cmd); err != nil {
 		return fmt.Errorf("decode access.revoke.requested: %w", err)
@@ -118,10 +121,10 @@ func (c *ConsumerHandler) HandleAccessRevokeRequested(ctx context.Context, env m
 
 	logger.Info("processing access revoke request")
 
-	_, err := c.repo.RevokeAccess(ctx, cmd.TransactionID)
-	if errors.Is(err, ErrNoActiveAccess) {
-		existing, lookupErr := c.repo.GetAccessByTransaction(ctx, cmd.TransactionID)
-		if lookupErr == nil && existing.Status == AccessStatusRevoked {
+	_, err := c.service.RevokeAccess(ctx, cmd.TransactionID)
+	if errors.Is(err, repository.ErrNoActiveAccess) {
+		existing, lookupErr := c.service.GetAccessByTransaction(ctx, cmd.TransactionID)
+		if lookupErr == nil && existing.Status == domain.AccessStatusRevoked {
 			logger.Info("access revoke already applied, replaying access.revoked")
 			return c.publisher.Publish(ctx,
 				messaging.ExchangeOutcomes,
@@ -134,7 +137,7 @@ func (c *ConsumerHandler) HandleAccessRevokeRequested(ctx context.Context, env m
 				},
 			)
 		}
-		if lookupErr != nil && !errors.Is(lookupErr, ErrNotFound) {
+		if lookupErr != nil && !errors.Is(lookupErr, repository.ErrNotFound) {
 			logger.Error("failed to load existing access after revoke miss", "error", lookupErr)
 			return fmt.Errorf("lookup existing access after revoke miss: %w", lookupErr)
 		}

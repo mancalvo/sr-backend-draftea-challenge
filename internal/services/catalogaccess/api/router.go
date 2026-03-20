@@ -1,4 +1,4 @@
-package catalogaccess
+package api
 
 import (
 	"log/slog"

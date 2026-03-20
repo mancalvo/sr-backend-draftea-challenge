@@ -1,4 +1,4 @@
-package catalogaccess
+package api
 
 import (
 	"errors"
@@ -9,17 +9,20 @@ import (
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/repository"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/service"
 )
 
 // Handler provides HTTP handlers for the catalog-access service.
 type Handler struct {
-	repo   Repository
-	logger *slog.Logger
+	service *service.Service
+	logger  *slog.Logger
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(repo Repository, logger *slog.Logger) *Handler {
-	return &Handler{repo: repo, logger: logger}
+func NewHandler(service *service.Service, logger *slog.Logger) *Handler {
+	return &Handler{service: service, logger: logger}
 }
 
 // GetEntitlements handles GET /users/{user_id}/entitlements.
@@ -37,18 +40,11 @@ func (h *Handler) GetEntitlements(w http.ResponseWriter, r *http.Request) {
 	)
 
 	// Verify user exists.
-	_, err := h.repo.GetUserByID(r.Context(), userID)
-	if errors.Is(err, ErrNotFound) {
+	entitlements, err := h.service.GetEntitlements(r.Context(), userID)
+	if errors.Is(err, repository.ErrNotFound) {
 		httpx.ErrorWithCode(w, http.StatusNotFound, "user not found", "USER_NOT_FOUND")
 		return
 	}
-	if err != nil {
-		logger.Error("failed to get user", "error", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-
-	entitlements, err := h.repo.ListEntitlements(r.Context(), userID)
 	if err != nil {
 		logger.Error("failed to list entitlements", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal server error")
@@ -57,7 +53,7 @@ func (h *Handler) GetEntitlements(w http.ResponseWriter, r *http.Request) {
 
 	// Return empty array instead of null.
 	if entitlements == nil {
-		entitlements = []Entitlement{}
+		entitlements = []domain.Entitlement{}
 	}
 
 	httpx.JSON(w, http.StatusOK, map[string]any{
@@ -87,50 +83,13 @@ func (h *Handler) PurchasePrecheck(w http.ResponseWriter, r *http.Request) {
 	)
 
 	// Check user exists.
-	_, err := h.repo.GetUserByID(r.Context(), req.UserID)
-	if errors.Is(err, ErrNotFound) {
-		httpx.JSON(w, http.StatusOK, PrecheckResult{Allowed: false, Reason: "user not found"})
-		return
-	}
+	result, err := h.service.PurchasePrecheck(r.Context(), req.UserID, req.OfferingID)
 	if err != nil {
-		logger.Error("purchase precheck: get user failed", "error", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-
-	// Check offering exists and is active.
-	offering, err := h.repo.GetOfferingByID(r.Context(), req.OfferingID)
-	if errors.Is(err, ErrNotFound) {
-		httpx.JSON(w, http.StatusOK, PrecheckResult{Allowed: false, Reason: "offering not found"})
-		return
-	}
-	if err != nil {
-		logger.Error("purchase precheck: get offering failed", "error", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-	if !offering.Active {
-		httpx.JSON(w, http.StatusOK, PrecheckResult{Allowed: false, Reason: "offering is not active"})
-		return
-	}
-
-	// Check no active access already exists.
-	_, err = h.repo.GetActiveAccess(r.Context(), req.UserID, req.OfferingID)
-	if err == nil {
-		httpx.JSON(w, http.StatusOK, PrecheckResult{Allowed: false, Reason: "user already has active access to this offering"})
-		return
-	}
-	if !errors.Is(err, ErrNotFound) {
 		logger.Error("purchase precheck: check active access failed", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-
-	httpx.JSON(w, http.StatusOK, PrecheckResult{
-		Allowed:  true,
-		Price:    offering.Price,
-		Currency: offering.Currency,
-	})
+	httpx.JSON(w, http.StatusOK, result)
 }
 
 // RefundPrecheck handles POST /internal/refund-precheck.
@@ -155,34 +114,11 @@ func (h *Handler) RefundPrecheck(w http.ResponseWriter, r *http.Request) {
 	)
 
 	// Check user exists.
-	_, err := h.repo.GetUserByID(r.Context(), req.UserID)
-	if errors.Is(err, ErrNotFound) {
-		httpx.JSON(w, http.StatusOK, PrecheckResult{Allowed: false, Reason: "user not found"})
-		return
-	}
+	result, err := h.service.RefundPrecheck(r.Context(), req.UserID, req.OfferingID, req.TransactionID)
 	if err != nil {
-		logger.Error("refund precheck: get user failed", "error", err)
+		logger.Error("refund precheck failed", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-
-	// Check there is an active access record for this transaction.
-	access, err := h.repo.GetActiveAccessByTransaction(r.Context(), req.TransactionID)
-	if errors.Is(err, ErrNotFound) {
-		httpx.JSON(w, http.StatusOK, PrecheckResult{Allowed: false, Reason: "no active access found for this transaction"})
-		return
-	}
-	if err != nil {
-		logger.Error("refund precheck: get access by transaction failed", "error", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-
-	// Verify the access record matches the expected user and offering.
-	if access.UserID != req.UserID || access.OfferingID != req.OfferingID {
-		httpx.JSON(w, http.StatusOK, PrecheckResult{Allowed: false, Reason: "access record does not match user and offering"})
-		return
-	}
-
-	httpx.JSON(w, http.StatusOK, PrecheckResult{Allowed: true})
+	httpx.JSON(w, http.StatusOK, result)
 }
