@@ -355,12 +355,13 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 
 	// Step 2: Register transaction in payments (sync).
 	_, err = h.paymentsClient.RegisterTransaction(r.Context(), RegisterTransactionRequest{
-		ID:         transactionID,
-		UserID:     cmd.UserID,
-		Type:       "refund",
-		Amount:     originalTxn.Amount,
-		Currency:   originalTxn.Currency,
-		OfferingID: &cmd.OfferingID,
+		ID:                    transactionID,
+		UserID:                cmd.UserID,
+		Type:                  "refund",
+		Amount:                originalTxn.Amount,
+		Currency:              originalTxn.Currency,
+		OfferingID:            &cmd.OfferingID,
+		OriginalTransactionID: &cmd.TransactionID,
 	})
 	if err != nil {
 		logger.Error("failed to register transaction in payments", "error", err)

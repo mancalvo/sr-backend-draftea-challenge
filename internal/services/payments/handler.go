@@ -41,6 +41,10 @@ func (h *Handler) CreateTransaction(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid transaction type")
 		return
 	}
+	if req.Type == TransactionTypeRefund && (req.OriginalTransactionID == nil || *req.OriginalTransactionID == "") {
+		httpx.Error(w, http.StatusBadRequest, "original_transaction_id is required for refunds")
+		return
+	}
 	if req.Currency == "" {
 		req.Currency = "ARS"
 	}
@@ -52,13 +56,14 @@ func (h *Handler) CreateTransaction(w http.ResponseWriter, r *http.Request) {
 	)
 
 	txn := &Transaction{
-		ID:         req.ID,
-		UserID:     req.UserID,
-		Type:       req.Type,
-		Status:     StatusPending,
-		Amount:     req.Amount,
-		Currency:   req.Currency,
-		OfferingID: req.OfferingID,
+		ID:                    req.ID,
+		UserID:                req.UserID,
+		Type:                  req.Type,
+		Status:                StatusPending,
+		Amount:                req.Amount,
+		Currency:              req.Currency,
+		OfferingID:            req.OfferingID,
+		OriginalTransactionID: req.OriginalTransactionID,
 	}
 
 	created, err := h.repo.CreateTransaction(r.Context(), txn)
@@ -101,7 +106,7 @@ func (h *Handler) UpdateTransactionStatus(w http.ResponseWriter, r *http.Request
 		slog.String("target_status", string(req.Status)),
 	)
 
-	updated, err := h.repo.UpdateTransactionStatus(r.Context(), txnID, req.Status, req.StatusReason)
+	updated, err := h.repo.UpdateTransactionStatus(r.Context(), txnID, req.Status, req.StatusReason, req.ProviderReference)
 	if errors.Is(err, ErrNotFound) {
 		httpx.ErrorWithCode(w, http.StatusNotFound, "transaction not found", "TRANSACTION_NOT_FOUND")
 		return

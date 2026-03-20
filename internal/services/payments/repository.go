@@ -36,7 +36,7 @@ type Repository interface {
 	// It validates the transition legality before applying the change.
 	// Returns ErrNotFound if the transaction does not exist, or ErrIllegalTransition
 	// if the transition is not allowed.
-	UpdateTransactionStatus(ctx context.Context, id string, status TransactionStatus, reason *string) (*Transaction, error)
+	UpdateTransactionStatus(ctx context.Context, id string, status TransactionStatus, reason *string, providerReference *string) (*Transaction, error)
 }
 
 // PostgresRepository implements Repository against the payments PostgreSQL schema.
@@ -50,13 +50,13 @@ func NewPostgresRepository(db *sql.DB) *PostgresRepository {
 }
 
 func (r *PostgresRepository) CreateTransaction(ctx context.Context, txn *Transaction) (*Transaction, error) {
-	const q = `INSERT INTO payments.transactions (id, user_id, type, status, amount, currency, offering_id, status_reason)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, user_id, type, status, amount, currency, offering_id, status_reason, created_at, updated_at`
+	const q = `INSERT INTO payments.transactions (id, user_id, type, status, amount, currency, offering_id, original_transaction_id, provider_reference, status_reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id, user_id, type, status, amount, currency, offering_id, original_transaction_id, provider_reference, status_reason, created_at, updated_at`
 
 	row := r.db.QueryRowContext(ctx, q,
 		txn.ID, txn.UserID, txn.Type, txn.Status,
-		txn.Amount, txn.Currency, txn.OfferingID, txn.StatusReason,
+		txn.Amount, txn.Currency, txn.OfferingID, txn.OriginalTransactionID, txn.ProviderReference, txn.StatusReason,
 	)
 	result, err := scanTransaction(row)
 	if err != nil {
@@ -69,7 +69,7 @@ func (r *PostgresRepository) CreateTransaction(ctx context.Context, txn *Transac
 }
 
 func (r *PostgresRepository) GetTransactionByID(ctx context.Context, id string) (*Transaction, error) {
-	const q = `SELECT id, user_id, type, status, amount, currency, offering_id, status_reason, created_at, updated_at
+	const q = `SELECT id, user_id, type, status, amount, currency, offering_id, original_transaction_id, provider_reference, status_reason, created_at, updated_at
 		FROM payments.transactions WHERE id = $1`
 	txn, err := scanTransaction(r.db.QueryRowContext(ctx, q, id))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -82,7 +82,7 @@ func (r *PostgresRepository) GetTransactionByID(ctx context.Context, id string) 
 }
 
 func (r *PostgresRepository) ListTransactionsByUserID(ctx context.Context, userID string) ([]Transaction, error) {
-	const q = `SELECT id, user_id, type, status, amount, currency, offering_id, status_reason, created_at, updated_at
+	const q = `SELECT id, user_id, type, status, amount, currency, offering_id, original_transaction_id, provider_reference, status_reason, created_at, updated_at
 		FROM payments.transactions
 		WHERE user_id = $1
 		ORDER BY created_at DESC`
@@ -96,16 +96,24 @@ func (r *PostgresRepository) ListTransactionsByUserID(ctx context.Context, userI
 	for rows.Next() {
 		var t Transaction
 		var offeringID sql.NullString
+		var originalTransactionID sql.NullString
+		var providerReference sql.NullString
 		var statusReason sql.NullString
 		if err := rows.Scan(
 			&t.ID, &t.UserID, &t.Type, &t.Status,
-			&t.Amount, &t.Currency, &offeringID, &statusReason,
+			&t.Amount, &t.Currency, &offeringID, &originalTransactionID, &providerReference, &statusReason,
 			&t.CreatedAt, &t.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan transaction: %w", err)
 		}
 		if offeringID.Valid {
 			t.OfferingID = &offeringID.String
+		}
+		if originalTransactionID.Valid {
+			t.OriginalTransactionID = &originalTransactionID.String
+		}
+		if providerReference.Valid {
+			t.ProviderReference = &providerReference.String
 		}
 		if statusReason.Valid {
 			t.StatusReason = &statusReason.String
@@ -133,14 +141,14 @@ func (r *PostgresRepository) ListTransactionsByUserIDPaginated(ctx context.Conte
 	var err error
 
 	if query.Cursor != nil {
-		const q = `SELECT id, user_id, type, status, amount, currency, offering_id, status_reason, created_at, updated_at
+		const q = `SELECT id, user_id, type, status, amount, currency, offering_id, original_transaction_id, provider_reference, status_reason, created_at, updated_at
 			FROM payments.transactions
 			WHERE user_id = $1 AND (created_at, id) < ($2, $3)
 			ORDER BY created_at DESC, id DESC
 			LIMIT $4`
 		rows, err = r.db.QueryContext(ctx, q, query.UserID, query.Cursor.CreatedAt, query.Cursor.ID, fetchLimit)
 	} else {
-		const q = `SELECT id, user_id, type, status, amount, currency, offering_id, status_reason, created_at, updated_at
+		const q = `SELECT id, user_id, type, status, amount, currency, offering_id, original_transaction_id, provider_reference, status_reason, created_at, updated_at
 			FROM payments.transactions
 			WHERE user_id = $1
 			ORDER BY created_at DESC, id DESC
@@ -156,16 +164,24 @@ func (r *PostgresRepository) ListTransactionsByUserIDPaginated(ctx context.Conte
 	for rows.Next() {
 		var t Transaction
 		var offeringID sql.NullString
+		var originalTransactionID sql.NullString
+		var providerReference sql.NullString
 		var statusReason sql.NullString
 		if err := rows.Scan(
 			&t.ID, &t.UserID, &t.Type, &t.Status,
-			&t.Amount, &t.Currency, &offeringID, &statusReason,
+			&t.Amount, &t.Currency, &offeringID, &originalTransactionID, &providerReference, &statusReason,
 			&t.CreatedAt, &t.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan transaction: %w", err)
 		}
 		if offeringID.Valid {
 			t.OfferingID = &offeringID.String
+		}
+		if originalTransactionID.Valid {
+			t.OriginalTransactionID = &originalTransactionID.String
+		}
+		if providerReference.Valid {
+			t.ProviderReference = &providerReference.String
 		}
 		if statusReason.Valid {
 			t.StatusReason = &statusReason.String
@@ -195,7 +211,7 @@ func (r *PostgresRepository) ListTransactionsByUserIDPaginated(ctx context.Conte
 	}, nil
 }
 
-func (r *PostgresRepository) UpdateTransactionStatus(ctx context.Context, id string, status TransactionStatus, reason *string) (*Transaction, error) {
+func (r *PostgresRepository) UpdateTransactionStatus(ctx context.Context, id string, status TransactionStatus, reason *string, providerReference *string) (*Transaction, error) {
 	// Use a database transaction to ensure atomicity of read-check-update.
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -204,14 +220,16 @@ func (r *PostgresRepository) UpdateTransactionStatus(ctx context.Context, id str
 	defer tx.Rollback()
 
 	// Read current status with row lock.
-	const selectQ = `SELECT id, user_id, type, status, amount, currency, offering_id, status_reason, created_at, updated_at
+	const selectQ = `SELECT id, user_id, type, status, amount, currency, offering_id, original_transaction_id, provider_reference, status_reason, created_at, updated_at
 		FROM payments.transactions WHERE id = $1 FOR UPDATE`
 	var current Transaction
 	var offeringID sql.NullString
+	var originalTransactionID sql.NullString
+	var currentProviderReference sql.NullString
 	var statusReason sql.NullString
 	if err := tx.QueryRowContext(ctx, selectQ, id).Scan(
 		&current.ID, &current.UserID, &current.Type, &current.Status,
-		&current.Amount, &current.Currency, &offeringID, &statusReason,
+		&current.Amount, &current.Currency, &offeringID, &originalTransactionID, &currentProviderReference, &statusReason,
 		&current.CreatedAt, &current.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -222,11 +240,22 @@ func (r *PostgresRepository) UpdateTransactionStatus(ctx context.Context, id str
 	if offeringID.Valid {
 		current.OfferingID = &offeringID.String
 	}
+	if originalTransactionID.Valid {
+		current.OriginalTransactionID = &originalTransactionID.String
+	}
+	if currentProviderReference.Valid {
+		current.ProviderReference = &currentProviderReference.String
+	}
 	if statusReason.Valid {
 		current.StatusReason = &statusReason.String
 	}
 
-	if current.Status == status && sameOptionalString(current.StatusReason, reason) {
+	effectiveProviderReference := current.ProviderReference
+	if providerReference != nil {
+		effectiveProviderReference = providerReference
+	}
+
+	if current.Status == status && sameOptionalString(current.StatusReason, reason) && sameOptionalString(current.ProviderReference, effectiveProviderReference) {
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("commit tx: %w", err)
 		}
@@ -234,29 +263,39 @@ func (r *PostgresRepository) UpdateTransactionStatus(ctx context.Context, id str
 	}
 
 	// Validate the transition.
-	if err := ValidateTransition(current.Status, status); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrIllegalTransition, err)
+	if current.Status != status {
+		if err := ValidateTransition(current.Status, status); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrIllegalTransition, err)
+		}
 	}
 
 	// Apply the update.
 	const updateQ = `UPDATE payments.transactions
-		SET status = $1, status_reason = $2, updated_at = now()
-		WHERE id = $3
-		RETURNING id, user_id, type, status, amount, currency, offering_id, status_reason, created_at, updated_at`
-	row := tx.QueryRowContext(ctx, updateQ, status, reason, id)
+		SET status = $1, status_reason = $2, provider_reference = $3, updated_at = now()
+		WHERE id = $4
+		RETURNING id, user_id, type, status, amount, currency, offering_id, original_transaction_id, provider_reference, status_reason, created_at, updated_at`
+	row := tx.QueryRowContext(ctx, updateQ, status, reason, effectiveProviderReference, id)
 
 	var t Transaction
 	var updatedOfferingID sql.NullString
+	var updatedOriginalTransactionID sql.NullString
+	var updatedProviderReference sql.NullString
 	var updatedStatusReason sql.NullString
 	if err := row.Scan(
 		&t.ID, &t.UserID, &t.Type, &t.Status,
-		&t.Amount, &t.Currency, &updatedOfferingID, &updatedStatusReason,
+		&t.Amount, &t.Currency, &updatedOfferingID, &updatedOriginalTransactionID, &updatedProviderReference, &updatedStatusReason,
 		&t.CreatedAt, &t.UpdatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("scan updated transaction: %w", err)
 	}
 	if updatedOfferingID.Valid {
 		t.OfferingID = &updatedOfferingID.String
+	}
+	if updatedOriginalTransactionID.Valid {
+		t.OriginalTransactionID = &updatedOriginalTransactionID.String
+	}
+	if updatedProviderReference.Valid {
+		t.ProviderReference = &updatedProviderReference.String
 	}
 	if updatedStatusReason.Valid {
 		t.StatusReason = &updatedStatusReason.String
@@ -272,10 +311,12 @@ func (r *PostgresRepository) UpdateTransactionStatus(ctx context.Context, id str
 func scanTransaction(row *sql.Row) (*Transaction, error) {
 	var t Transaction
 	var offeringID sql.NullString
+	var originalTransactionID sql.NullString
+	var providerReference sql.NullString
 	var statusReason sql.NullString
 	err := row.Scan(
 		&t.ID, &t.UserID, &t.Type, &t.Status,
-		&t.Amount, &t.Currency, &offeringID, &statusReason,
+		&t.Amount, &t.Currency, &offeringID, &originalTransactionID, &providerReference, &statusReason,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -286,6 +327,12 @@ func scanTransaction(row *sql.Row) (*Transaction, error) {
 	}
 	if offeringID.Valid {
 		t.OfferingID = &offeringID.String
+	}
+	if originalTransactionID.Valid {
+		t.OriginalTransactionID = &originalTransactionID.String
+	}
+	if providerReference.Valid {
+		t.ProviderReference = &providerReference.String
 	}
 	if statusReason.Valid {
 		t.StatusReason = &statusReason.String
@@ -442,7 +489,7 @@ func (m *MemoryRepository) ListTransactionsByUserIDPaginated(_ context.Context, 
 	}, nil
 }
 
-func (m *MemoryRepository) UpdateTransactionStatus(_ context.Context, id string, status TransactionStatus, reason *string) (*Transaction, error) {
+func (m *MemoryRepository) UpdateTransactionStatus(_ context.Context, id string, status TransactionStatus, reason *string, providerReference *string) (*Transaction, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -451,17 +498,25 @@ func (m *MemoryRepository) UpdateTransactionStatus(_ context.Context, id string,
 		return nil, ErrNotFound
 	}
 
-	if txn.Status == status && sameOptionalString(txn.StatusReason, reason) {
+	effectiveProviderReference := txn.ProviderReference
+	if providerReference != nil {
+		effectiveProviderReference = providerReference
+	}
+
+	if txn.Status == status && sameOptionalString(txn.StatusReason, reason) && sameOptionalString(txn.ProviderReference, effectiveProviderReference) {
 		result := *txn
 		return &result, nil
 	}
 
-	if err := ValidateTransition(txn.Status, status); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrIllegalTransition, err)
+	if txn.Status != status {
+		if err := ValidateTransition(txn.Status, status); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrIllegalTransition, err)
+		}
 	}
 
 	txn.Status = status
 	txn.StatusReason = reason
+	txn.ProviderReference = effectiveProviderReference
 	txn.UpdatedAt = time.Now().UTC()
 
 	result := *txn

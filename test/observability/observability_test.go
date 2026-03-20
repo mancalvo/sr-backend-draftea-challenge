@@ -402,7 +402,7 @@ func (c *noopPaymentsClient) GetTransaction(_ context.Context, transactionID str
 		OfferingID: &offeringID,
 	}, nil
 }
-func (c *noopPaymentsClient) UpdateTransactionStatus(_ context.Context, _, _ string, _ *string) error {
+func (c *noopPaymentsClient) UpdateTransactionStatus(_ context.Context, _, _ string, _ *string, _ *string) error {
 	return nil
 }
 

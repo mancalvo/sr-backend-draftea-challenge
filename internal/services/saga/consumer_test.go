@@ -66,6 +66,7 @@ type statusUpdate struct {
 	TransactionID string
 	Status        string
 	Reason        *string
+	ProviderRef   *string
 }
 
 func (c *recordingPaymentsClient) RegisterTransaction(_ context.Context, req RegisterTransactionRequest) (*RegisterTransactionResponse, error) {
@@ -85,13 +86,14 @@ func (c *recordingPaymentsClient) GetTransaction(_ context.Context, transactionI
 	}, nil
 }
 
-func (c *recordingPaymentsClient) UpdateTransactionStatus(_ context.Context, transactionID string, status string, reason *string) error {
+func (c *recordingPaymentsClient) UpdateTransactionStatus(_ context.Context, transactionID string, status string, reason *string, providerReference *string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.updates = append(c.updates, statusUpdate{
 		TransactionID: transactionID,
 		Status:        status,
 		Reason:        reason,
+		ProviderRef:   providerReference,
 	})
 	return nil
 }
@@ -777,7 +779,7 @@ func (c *failingPaymentsClient) GetTransaction(_ context.Context, transactionID 
 	}, nil
 }
 
-func (c *failingPaymentsClient) UpdateTransactionStatus(_ context.Context, transactionID string, status string, reason *string) error {
+func (c *failingPaymentsClient) UpdateTransactionStatus(_ context.Context, transactionID string, status string, reason *string, providerReference *string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.callCount++
@@ -788,6 +790,7 @@ func (c *failingPaymentsClient) UpdateTransactionStatus(_ context.Context, trans
 		TransactionID: transactionID,
 		Status:        status,
 		Reason:        reason,
+		ProviderRef:   providerReference,
 	})
 	return nil
 }
@@ -1190,14 +1193,23 @@ func TestDepositFlow_HappyPath(t *testing.T) {
 
 	// Verify transaction was marked completed.
 	updates := payments.Updates()
-	if len(updates) != 1 {
-		t.Fatalf("expected 1 status update, got %d", len(updates))
+	if len(updates) != 2 {
+		t.Fatalf("expected 2 status updates, got %d", len(updates))
 	}
 	if updates[0].TransactionID != txnID {
 		t.Errorf("transaction_id = %s, want %s", updates[0].TransactionID, txnID)
 	}
-	if updates[0].Status != "completed" {
-		t.Errorf("status = %s, want completed", updates[0].Status)
+	if updates[0].Status != "pending" {
+		t.Errorf("status = %s, want pending", updates[0].Status)
+	}
+	if updates[0].ProviderRef == nil || *updates[0].ProviderRef != "sim-"+txnID {
+		t.Errorf("provider_ref = %v, want %q", updates[0].ProviderRef, "sim-"+txnID)
+	}
+	if updates[1].Status != "completed" {
+		t.Errorf("status = %s, want completed", updates[1].Status)
+	}
+	if updates[1].ProviderRef != nil {
+		t.Errorf("completed provider_ref = %v, want nil", updates[1].ProviderRef)
 	}
 }
 
@@ -1367,11 +1379,17 @@ func TestDepositFlow_LateSuccessAfterTimeout(t *testing.T) {
 
 	// Verify transaction was marked completed.
 	updates := payments.Updates()
-	if len(updates) != 1 {
-		t.Fatalf("expected 1 status update, got %d", len(updates))
+	if len(updates) != 2 {
+		t.Fatalf("expected 2 status updates, got %d", len(updates))
 	}
-	if updates[0].Status != "completed" {
-		t.Errorf("status = %s, want completed", updates[0].Status)
+	if updates[0].Status != "timed_out" {
+		t.Errorf("status = %s, want timed_out", updates[0].Status)
+	}
+	if updates[0].ProviderRef == nil || *updates[0].ProviderRef != "sim-"+txnID {
+		t.Errorf("provider_ref = %v, want %q", updates[0].ProviderRef, "sim-"+txnID)
+	}
+	if updates[1].Status != "completed" {
+		t.Errorf("status = %s, want completed", updates[1].Status)
 	}
 }
 

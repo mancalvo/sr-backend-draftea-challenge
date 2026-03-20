@@ -183,7 +183,7 @@ func (c *paymentsHTTPClient) GetTransaction(_ context.Context, transactionID str
 	}, nil
 }
 
-func (c *paymentsHTTPClient) UpdateTransactionStatus(_ context.Context, _ string, _ string, _ *string) error {
+func (c *paymentsHTTPClient) UpdateTransactionStatus(_ context.Context, _ string, _ string, _ *string, _ *string) error {
 	return nil
 }
 

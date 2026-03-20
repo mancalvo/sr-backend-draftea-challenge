@@ -195,7 +195,7 @@ func (c *ConsumerHandler) handleWalletDebitRejected(ctx context.Context, env mes
 
 	// Insufficient funds -> fail the saga and the transaction.
 	reason := fmt.Sprintf("wallet debit rejected: %s", payload.Reason)
-	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason); err != nil {
+	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason, nil); err != nil {
 		logger.Error("failed to update transaction to failed", "error", err)
 		return fmt.Errorf("update transaction status to failed: %w", err)
 	}
@@ -237,7 +237,7 @@ func (c *ConsumerHandler) handleWalletCredited(ctx context.Context, env messagin
 	// For purchase sagas in compensating status: credit completes the compensation.
 	if s.Type == SagaTypePurchase && s.Status == StatusCompensating {
 		reason := "access grant conflicted, debit reversed"
-		if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "compensated", &reason); err != nil {
+		if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "compensated", &reason, nil); err != nil {
 			logger.Error("failed to update transaction to compensated", "error", err)
 			return fmt.Errorf("update transaction status to compensated: %w", err)
 		}
@@ -259,7 +259,7 @@ func (c *ConsumerHandler) handleWalletCredited(ctx context.Context, env messagin
 	// For deposit sagas: credit completes the deposit successfully.
 	// Valid from both running (normal flow) and timed_out (late provider success).
 	if s.Type == SagaTypeDeposit && (s.Status == StatusRunning || s.Status == StatusTimedOut) {
-		if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil); err != nil {
+		if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil, nil); err != nil {
 			logger.Error("failed to update transaction to completed", "error", err)
 			return fmt.Errorf("update transaction status to completed: %w", err)
 		}
@@ -280,7 +280,7 @@ func (c *ConsumerHandler) handleWalletCredited(ctx context.Context, env messagin
 
 	// For refund sagas in running status: credit completes the refund successfully.
 	if s.Type == SagaTypeRefund && s.Status == StatusRunning {
-		if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil); err != nil {
+		if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil, nil); err != nil {
 			logger.Error("failed to update transaction to completed", "error", err)
 			return fmt.Errorf("update transaction status to completed: %w", err)
 		}
@@ -327,7 +327,7 @@ func (c *ConsumerHandler) handleAccessGranted(ctx context.Context, env messaging
 	}
 
 	// Access granted -> purchase completed successfully.
-	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil); err != nil {
+	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil, nil); err != nil {
 		logger.Error("failed to update transaction to completed", "error", err)
 		return fmt.Errorf("update transaction status to completed: %w", err)
 	}
@@ -495,7 +495,7 @@ func (c *ConsumerHandler) handleAccessRevokeRejected(ctx context.Context, env me
 	// Revoke rejected (access already inactive) -> fail the saga and the transaction.
 	// Do not credit the wallet since revoke did not succeed.
 	reason := fmt.Sprintf("access revoke rejected: %s", payload.Reason)
-	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason); err != nil {
+	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason, nil); err != nil {
 		logger.Error("failed to update transaction to failed", "error", err)
 		return fmt.Errorf("update transaction status to failed: %w", err)
 	}
@@ -541,6 +541,15 @@ func (c *ConsumerHandler) handleProviderChargeSucceeded(ctx context.Context, env
 	depositPayload, err := decodeDepositPayload(s)
 	if err != nil {
 		return err
+	}
+
+	transactionStatus := "pending"
+	if s.Status == StatusTimedOut {
+		transactionStatus = "timed_out"
+	}
+	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, transactionStatus, nil, &payload.ProviderRef); err != nil {
+		logger.Error("failed to record provider reference", "error", err)
+		return fmt.Errorf("record provider reference: %w", err)
 	}
 
 	// Provider charge succeeded -> publish wallet.credit.requested.
@@ -600,7 +609,7 @@ func (c *ConsumerHandler) handleProviderChargeFailed(ctx context.Context, env me
 	// Provider charge failed -> fail the saga and the transaction.
 	// This is valid from both running and timed_out statuses.
 	reason := fmt.Sprintf("provider charge failed: %s", payload.Reason)
-	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason); err != nil {
+	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason, nil); err != nil {
 		logger.Error("failed to update transaction to failed", "error", err)
 		return fmt.Errorf("update transaction status to failed: %w", err)
 	}

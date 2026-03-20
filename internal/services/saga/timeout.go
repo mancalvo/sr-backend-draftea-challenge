@@ -89,7 +89,7 @@ func (p *TimeoutPoller) poll(ctx context.Context) {
 		)
 
 		reason := "saga timeout exceeded"
-		if err := p.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "timed_out", &reason); err != nil {
+		if err := p.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "timed_out", &reason, nil); err != nil {
 			logger.Error("failed to update transaction to timed_out", "error", err)
 			continue
 		}

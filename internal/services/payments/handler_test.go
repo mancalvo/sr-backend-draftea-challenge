@@ -103,6 +103,61 @@ func TestCreateTransaction_WithOfferingID(t *testing.T) {
 	}
 }
 
+func TestCreateTransaction_RefundRequiresOriginalTransactionID(t *testing.T) {
+	repo := NewMemoryRepository()
+	h := NewHandler(repo, testLogger())
+	router := newTestRouter(h)
+
+	body, _ := json.Marshal(CreateTransactionRequest{
+		ID:       "txn-1",
+		UserID:   "user-1",
+		Type:     TransactionTypeRefund,
+		Amount:   5000,
+		Currency: "ARS",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/internal/transactions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestCreateTransaction_RefundPersistsOriginalTransactionID(t *testing.T) {
+	repo := NewMemoryRepository()
+	h := NewHandler(repo, testLogger())
+	router := newTestRouter(h)
+
+	originalTransactionID := "txn-purchase-1"
+	body, _ := json.Marshal(CreateTransactionRequest{
+		ID:                    "txn-1",
+		UserID:                "user-1",
+		Type:                  TransactionTypeRefund,
+		Amount:                5000,
+		Currency:              "ARS",
+		OriginalTransactionID: &originalTransactionID,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/internal/transactions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var resp httpx.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	data := resp.Data.(map[string]any)
+	if data["original_transaction_id"] != originalTransactionID {
+		t.Errorf("original_transaction_id = %v, want %s", data["original_transaction_id"], originalTransactionID)
+	}
+}
+
 func TestCreateTransaction_DuplicateID(t *testing.T) {
 	repo := NewMemoryRepository()
 	h := NewHandler(repo, testLogger())
@@ -331,6 +386,35 @@ func TestUpdateTransactionStatus_WithReason(t *testing.T) {
 	}
 }
 
+func TestUpdateTransactionStatus_WithProviderReference(t *testing.T) {
+	repo := NewMemoryRepository()
+	h := NewHandler(repo, testLogger())
+	router := newTestRouter(h)
+
+	repo.CreateTransaction(context.Background(), &Transaction{
+		ID: "txn-1", UserID: "user-1", Type: TransactionTypeDeposit,
+		Status: StatusPending, Amount: 1000, Currency: "ARS",
+	})
+
+	providerReference := "sim-txn-1"
+	body, _ := json.Marshal(UpdateStatusRequest{Status: StatusPending, ProviderReference: &providerReference})
+	req := httptest.NewRequest(http.MethodPatch, "/internal/transactions/txn-1/status", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp httpx.Response
+	json.NewDecoder(rec.Body).Decode(&resp)
+	data := resp.Data.(map[string]any)
+	if data["provider_reference"] != providerReference {
+		t.Errorf("provider_reference = %v, want %s", data["provider_reference"], providerReference)
+	}
+}
+
 // --- GET /transactions/{transaction_id} ---
 
 func TestGetTransaction_Found(t *testing.T) {
@@ -338,9 +422,19 @@ func TestGetTransaction_Found(t *testing.T) {
 	h := NewHandler(repo, testLogger())
 	router := newTestRouter(h)
 
+	offeringID := "offering-1"
+	originalTransactionID := "txn-purchase-1"
+	providerReference := "sim-txn-1"
 	repo.CreateTransaction(context.Background(), &Transaction{
-		ID: "txn-1", UserID: "user-1", Type: TransactionTypeDeposit,
-		Status: StatusPending, Amount: 10000, Currency: "ARS",
+		ID:                    "txn-1",
+		UserID:                "user-1",
+		Type:                  TransactionTypeRefund,
+		Status:                StatusPending,
+		Amount:                10000,
+		Currency:              "ARS",
+		OfferingID:            &offeringID,
+		OriginalTransactionID: &originalTransactionID,
+		ProviderReference:     &providerReference,
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/transactions/txn-1", nil)
@@ -359,6 +453,15 @@ func TestGetTransaction_Found(t *testing.T) {
 	data := resp.Data.(map[string]any)
 	if data["id"] != "txn-1" {
 		t.Errorf("id = %v, want txn-1", data["id"])
+	}
+	if data["offering_id"] != offeringID {
+		t.Errorf("offering_id = %v, want %s", data["offering_id"], offeringID)
+	}
+	if data["original_transaction_id"] != originalTransactionID {
+		t.Errorf("original_transaction_id = %v, want %s", data["original_transaction_id"], originalTransactionID)
+	}
+	if data["provider_reference"] != providerReference {
+		t.Errorf("provider_reference = %v, want %s", data["provider_reference"], providerReference)
 	}
 }
 

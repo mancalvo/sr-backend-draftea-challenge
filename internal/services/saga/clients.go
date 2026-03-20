@@ -38,17 +38,18 @@ type PaymentsClient interface {
 	GetTransaction(ctx context.Context, transactionID string) (*TransactionDetails, error)
 
 	// UpdateTransactionStatus transitions a transaction to a new status.
-	UpdateTransactionStatus(ctx context.Context, transactionID string, status string, reason *string) error
+	UpdateTransactionStatus(ctx context.Context, transactionID string, status string, reason *string, providerReference *string) error
 }
 
 // RegisterTransactionRequest is the body for POST /internal/transactions on payments.
 type RegisterTransactionRequest struct {
-	ID         string  `json:"id"`
-	UserID     string  `json:"user_id"`
-	Type       string  `json:"type"`
-	Amount     int64   `json:"amount"`
-	Currency   string  `json:"currency"`
-	OfferingID *string `json:"offering_id,omitempty"`
+	ID                    string  `json:"id"`
+	UserID                string  `json:"user_id"`
+	Type                  string  `json:"type"`
+	Amount                int64   `json:"amount"`
+	Currency              string  `json:"currency"`
+	OfferingID            *string `json:"offering_id,omitempty"`
+	OriginalTransactionID *string `json:"original_transaction_id,omitempty"`
 }
 
 // RegisterTransactionResponse is the parsed response from transaction registration.
@@ -59,13 +60,15 @@ type RegisterTransactionResponse struct {
 
 // TransactionDetails mirrors the payments transaction response needed by saga.
 type TransactionDetails struct {
-	ID         string  `json:"id"`
-	UserID     string  `json:"user_id"`
-	Type       string  `json:"type"`
-	Status     string  `json:"status"`
-	Amount     int64   `json:"amount"`
-	Currency   string  `json:"currency"`
-	OfferingID *string `json:"offering_id,omitempty"`
+	ID                    string  `json:"id"`
+	UserID                string  `json:"user_id"`
+	Type                  string  `json:"type"`
+	Status                string  `json:"status"`
+	Amount                int64   `json:"amount"`
+	Currency              string  `json:"currency"`
+	OfferingID            *string `json:"offering_id,omitempty"`
+	OriginalTransactionID *string `json:"original_transaction_id,omitempty"`
+	ProviderReference     *string `json:"provider_reference,omitempty"`
 }
 
 // ---- HTTP implementations ----
@@ -222,12 +225,15 @@ func (c *HTTPPaymentsClient) GetTransaction(ctx context.Context, transactionID s
 	return &envelope.Data, nil
 }
 
-func (c *HTTPPaymentsClient) UpdateTransactionStatus(ctx context.Context, transactionID string, status string, reason *string) error {
+func (c *HTTPPaymentsClient) UpdateTransactionStatus(ctx context.Context, transactionID string, status string, reason *string, providerReference *string) error {
 	payload := map[string]any{
 		"status": status,
 	}
 	if reason != nil {
 		payload["status_reason"] = *reason
+	}
+	if providerReference != nil {
+		payload["provider_reference"] = *providerReference
 	}
 
 	body, err := json.Marshal(payload)

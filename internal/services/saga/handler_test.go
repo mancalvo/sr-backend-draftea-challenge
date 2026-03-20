@@ -107,7 +107,7 @@ func (m *mockPaymentsClient) GetTransaction(_ context.Context, transactionID str
 	}, nil
 }
 
-func (m *mockPaymentsClient) UpdateTransactionStatus(_ context.Context, _ string, _ string, _ *string) error {
+func (m *mockPaymentsClient) UpdateTransactionStatus(_ context.Context, _ string, _ string, _ *string, _ *string) error {
 	return m.updateErr
 }
 
@@ -1108,6 +1108,9 @@ func TestHandleRefund_UsesOriginalTransactionMoney(t *testing.T) {
 	}
 	if payments.registerCalls[0].Currency != "USD" {
 		t.Errorf("registered currency = %s, want USD", payments.registerCalls[0].Currency)
+	}
+	if payments.registerCalls[0].OriginalTransactionID == nil || *payments.registerCalls[0].OriginalTransactionID != "orig-txn-1" {
+		t.Errorf("original_transaction_id = %v, want orig-txn-1", payments.registerCalls[0].OriginalTransactionID)
 	}
 
 	sagaResp := struct {

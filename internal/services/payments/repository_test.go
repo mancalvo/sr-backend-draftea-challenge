@@ -59,6 +59,34 @@ func TestMemoryRepo_CreateTransaction_DefaultPendingStatus(t *testing.T) {
 	}
 }
 
+func TestMemoryRepo_CreateTransaction_WithAuditFields(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	originalTransactionID := "txn-purchase-1"
+	providerReference := "sim-txn-1"
+	txn := &Transaction{
+		ID:                    "txn-1",
+		UserID:                "user-1",
+		Type:                  TransactionTypeRefund,
+		Amount:                5000,
+		Currency:              "ARS",
+		OriginalTransactionID: &originalTransactionID,
+		ProviderReference:     &providerReference,
+	}
+
+	created, err := repo.CreateTransaction(ctx, txn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if created.OriginalTransactionID == nil || *created.OriginalTransactionID != originalTransactionID {
+		t.Errorf("original_transaction_id = %v, want %q", created.OriginalTransactionID, originalTransactionID)
+	}
+	if created.ProviderReference == nil || *created.ProviderReference != providerReference {
+		t.Errorf("provider_reference = %v, want %q", created.ProviderReference, providerReference)
+	}
+}
+
 func TestMemoryRepo_CreateTransaction_DuplicateID(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()
@@ -212,7 +240,7 @@ func TestMemoryRepo_UpdateStatus_LegalTransitions(t *testing.T) {
 			}
 			_, _ = repo.CreateTransaction(ctx, txn)
 
-			updated, err := repo.UpdateTransactionStatus(ctx, "txn-1", tt.to, nil)
+			updated, err := repo.UpdateTransactionStatus(ctx, "txn-1", tt.to, nil, nil)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -251,7 +279,7 @@ func TestMemoryRepo_UpdateStatus_IllegalTransitions(t *testing.T) {
 			}
 			_, _ = repo.CreateTransaction(ctx, txn)
 
-			_, err := repo.UpdateTransactionStatus(ctx, "txn-1", tt.to, nil)
+			_, err := repo.UpdateTransactionStatus(ctx, "txn-1", tt.to, nil, nil)
 			if !errors.Is(err, ErrIllegalTransition) {
 				t.Fatalf("expected ErrIllegalTransition, got %v", err)
 			}
@@ -261,7 +289,7 @@ func TestMemoryRepo_UpdateStatus_IllegalTransitions(t *testing.T) {
 
 func TestMemoryRepo_UpdateStatus_NotFound(t *testing.T) {
 	repo := NewMemoryRepository()
-	_, err := repo.UpdateTransactionStatus(context.Background(), "nonexistent", StatusCompleted, nil)
+	_, err := repo.UpdateTransactionStatus(context.Background(), "nonexistent", StatusCompleted, nil, nil)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
@@ -278,7 +306,7 @@ func TestMemoryRepo_UpdateStatus_WithReason(t *testing.T) {
 	_, _ = repo.CreateTransaction(ctx, txn)
 
 	reason := "provider declined the charge"
-	updated, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusFailed, &reason)
+	updated, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusFailed, &reason, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -298,12 +326,12 @@ func TestMemoryRepo_UpdateStatus_SameTargetAndReason_IsIdempotent(t *testing.T) 
 	_, _ = repo.CreateTransaction(ctx, txn)
 
 	reason := "provider declined the charge"
-	first, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusFailed, &reason)
+	first, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusFailed, &reason, nil)
 	if err != nil {
 		t.Fatalf("first update: %v", err)
 	}
 
-	second, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusFailed, &reason)
+	second, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusFailed, &reason, nil)
 	if err != nil {
 		t.Fatalf("second update: %v", err)
 	}
@@ -319,6 +347,51 @@ func TestMemoryRepo_UpdateStatus_SameTargetAndReason_IsIdempotent(t *testing.T) 
 	}
 }
 
+func TestMemoryRepo_UpdateStatus_SameStatusCanRecordProviderReference(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	txn := &Transaction{
+		ID: "txn-1", UserID: "user-1", Type: TransactionTypeDeposit,
+		Status: StatusPending, Amount: 1000, Currency: "ARS",
+	}
+	_, _ = repo.CreateTransaction(ctx, txn)
+
+	providerReference := "sim-txn-1"
+	updated, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusPending, nil, &providerReference)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if updated.ProviderReference == nil || *updated.ProviderReference != providerReference {
+		t.Errorf("provider_reference = %v, want %q", updated.ProviderReference, providerReference)
+	}
+}
+
+func TestMemoryRepo_UpdateStatus_PreservesProviderReferenceOnLaterTransition(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	txn := &Transaction{
+		ID: "txn-1", UserID: "user-1", Type: TransactionTypeDeposit,
+		Status: StatusPending, Amount: 1000, Currency: "ARS",
+	}
+	_, _ = repo.CreateTransaction(ctx, txn)
+
+	providerReference := "sim-txn-1"
+	_, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusPending, nil, &providerReference)
+	if err != nil {
+		t.Fatalf("record provider reference: %v", err)
+	}
+
+	updated, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusCompleted, nil, nil)
+	if err != nil {
+		t.Fatalf("transition to completed: %v", err)
+	}
+	if updated.ProviderReference == nil || *updated.ProviderReference != providerReference {
+		t.Errorf("provider_reference = %v, want %q", updated.ProviderReference, providerReference)
+	}
+}
+
 func TestMemoryRepo_UpdateStatus_TimedOutThenCompleted(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()
@@ -330,13 +403,13 @@ func TestMemoryRepo_UpdateStatus_TimedOutThenCompleted(t *testing.T) {
 	_, _ = repo.CreateTransaction(ctx, txn)
 
 	// First transition to timed_out.
-	_, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusTimedOut, nil)
+	_, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusTimedOut, nil, nil)
 	if err != nil {
 		t.Fatalf("timeout transition: %v", err)
 	}
 
 	// Late event resolves to completed.
-	_, err = repo.UpdateTransactionStatus(ctx, "txn-1", StatusCompleted, nil)
+	_, err = repo.UpdateTransactionStatus(ctx, "txn-1", StatusCompleted, nil, nil)
 	if err != nil {
 		t.Fatalf("completed after timeout: %v", err)
 	}

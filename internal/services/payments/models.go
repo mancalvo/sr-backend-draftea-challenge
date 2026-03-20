@@ -86,32 +86,36 @@ const (
 
 // Transaction represents a transaction record owned by the payments service.
 type Transaction struct {
-	ID           string            `json:"id"`
-	UserID       string            `json:"user_id"`
-	Type         TransactionType   `json:"type"`
-	Status       TransactionStatus `json:"status"`
-	Amount       int64             `json:"amount"`
-	Currency     string            `json:"currency"`
-	OfferingID   *string           `json:"offering_id,omitempty"`
-	StatusReason *string           `json:"status_reason,omitempty"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at"`
+	ID                    string            `json:"id"`
+	UserID                string            `json:"user_id"`
+	Type                  TransactionType   `json:"type"`
+	Status                TransactionStatus `json:"status"`
+	Amount                int64             `json:"amount"`
+	Currency              string            `json:"currency"`
+	OfferingID            *string           `json:"offering_id,omitempty"`
+	OriginalTransactionID *string           `json:"original_transaction_id,omitempty"`
+	ProviderReference     *string           `json:"provider_reference,omitempty"`
+	StatusReason          *string           `json:"status_reason,omitempty"`
+	CreatedAt             time.Time         `json:"created_at"`
+	UpdatedAt             time.Time         `json:"updated_at"`
 }
 
 // CreateTransactionRequest is the body for POST /internal/transactions.
 type CreateTransactionRequest struct {
-	ID         string          `json:"id"`
-	UserID     string          `json:"user_id"`
-	Type       TransactionType `json:"type"`
-	Amount     int64           `json:"amount"`
-	Currency   string          `json:"currency"`
-	OfferingID *string         `json:"offering_id,omitempty"`
+	ID                    string          `json:"id"`
+	UserID                string          `json:"user_id"`
+	Type                  TransactionType `json:"type"`
+	Amount                int64           `json:"amount"`
+	Currency              string          `json:"currency"`
+	OfferingID            *string         `json:"offering_id,omitempty"`
+	OriginalTransactionID *string         `json:"original_transaction_id,omitempty"`
 }
 
 // UpdateStatusRequest is the body for PATCH /internal/transactions/{transaction_id}/status.
 type UpdateStatusRequest struct {
-	Status       TransactionStatus `json:"status"`
-	StatusReason *string           `json:"status_reason,omitempty"`
+	Status            TransactionStatus `json:"status"`
+	StatusReason      *string           `json:"status_reason,omitempty"`
+	ProviderReference *string           `json:"provider_reference,omitempty"`
 }
 
 // legalTransitions defines the allowed state transitions for the transaction state machine.
