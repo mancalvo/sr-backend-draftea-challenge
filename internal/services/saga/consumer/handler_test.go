@@ -1,4 +1,4 @@
-package saga
+package consumer
 
 import (
 	"bytes"
@@ -14,12 +14,102 @@ import (
 	"time"
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/activities"
+	sagaapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/api"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/workflows"
 )
+
+type (
+	IdempotencyKey              = domain.IdempotencyKey
+	MemoryRepository            = repository.MemoryRepository
+	PrecheckResult              = client.PrecheckResult
+	PurchaseCommand             = sagaapi.PurchaseCommand
+	RegisterTransactionRequest  = client.RegisterTransactionRequest
+	RegisterTransactionResponse = client.RegisterTransactionResponse
+	SagaInstance                = domain.SagaInstance
+	SagaOutcome                 = domain.SagaOutcome
+	SagaStatus                  = domain.SagaStatus
+	TransactionDetails          = client.TransactionDetails
+)
+
+const (
+	OutcomeCompensated = domain.OutcomeCompensated
+	OutcomeFailed      = domain.OutcomeFailed
+	OutcomeSucceeded   = domain.OutcomeSucceeded
+
+	SagaTypeDeposit  = domain.SagaTypeDeposit
+	SagaTypePurchase = domain.SagaTypePurchase
+	SagaTypeRefund   = domain.SagaTypeRefund
+
+	StatusCompensating = domain.StatusCompensating
+	StatusCompleted    = domain.StatusCompleted
+	StatusCreated      = domain.StatusCreated
+	StatusFailed       = domain.StatusFailed
+	StatusRunning      = domain.StatusRunning
+	StatusTimedOut     = domain.StatusTimedOut
+)
+
+type (
+	DepositPayload  = workflows.DepositPayload
+	PurchasePayload = workflows.PurchasePayload
+	RefundPayload   = workflows.RefundPayload
+)
+
+var NewMemoryRepository = repository.NewMemoryRepository
+
+func NewConsumerHandler(
+	repo repository.Repository,
+	paymentsClient client.PaymentsClient,
+	publisher activities.Publisher,
+	logger *slog.Logger,
+) *Handler {
+	return NewHandler(repo, paymentsClient, publisher, logger)
+}
 
 // ---- Test helpers ----
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+type mockCatalogClient struct {
+	purchaseResult *PrecheckResult
+	purchaseErr    error
+	refundResult   *PrecheckResult
+	refundErr      error
+}
+
+func (m *mockCatalogClient) PurchasePrecheck(_ context.Context, _, _ string) (*PrecheckResult, error) {
+	if m.purchaseErr != nil {
+		return nil, m.purchaseErr
+	}
+	if m.purchaseResult == nil {
+		return &PrecheckResult{Allowed: true, Price: 5000, Currency: "ARS"}, nil
+	}
+	result := *m.purchaseResult
+	if result.Allowed {
+		if result.Price == 0 {
+			result.Price = 5000
+		}
+		if result.Currency == "" {
+			result.Currency = "ARS"
+		}
+	}
+	return &result, nil
+}
+
+func (m *mockCatalogClient) RefundPrecheck(_ context.Context, _, _, _ string) (*PrecheckResult, error) {
+	if m.refundErr != nil {
+		return nil, m.refundErr
+	}
+	if m.refundResult == nil {
+		return &PrecheckResult{Allowed: true}, nil
+	}
+	result := *m.refundResult
+	return &result, nil
 }
 
 // publishedMessage records a single message published via the mock publisher.
@@ -60,6 +150,53 @@ func (p *recordingPublisher) Messages() []publishedMessage {
 type recordingPaymentsClient struct {
 	mu      sync.Mutex
 	updates []statusUpdate
+}
+
+type mockPaymentsClient struct {
+	registerResult *RegisterTransactionResponse
+	registerErr    error
+	getResult      *TransactionDetails
+	getErr         error
+	updateErr      error
+	registerCalls  []RegisterTransactionRequest
+}
+
+func (m *mockPaymentsClient) RegisterTransaction(_ context.Context, req RegisterTransactionRequest) (*RegisterTransactionResponse, error) {
+	m.registerCalls = append(m.registerCalls, req)
+	if m.registerErr != nil {
+		return nil, m.registerErr
+	}
+	if m.registerResult != nil {
+		return m.registerResult, nil
+	}
+	return &RegisterTransactionResponse{ID: req.ID, Status: "pending"}, nil
+}
+
+func (m *mockPaymentsClient) GetTransaction(_ context.Context, transactionID string) (*TransactionDetails, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	if m.getResult != nil {
+		result := *m.getResult
+		if result.ID == "" {
+			result.ID = transactionID
+		}
+		return &result, nil
+	}
+	offeringID := "offering-1"
+	return &TransactionDetails{
+		ID:         transactionID,
+		UserID:     "user-1",
+		Type:       "purchase",
+		Status:     "completed",
+		Amount:     5000,
+		Currency:   "ARS",
+		OfferingID: &offeringID,
+	}, nil
+}
+
+func (m *mockPaymentsClient) UpdateTransactionStatus(_ context.Context, _ string, _ string, _ *string, _ *string) error {
+	return m.updateErr
 }
 
 type statusUpdate struct {
@@ -166,6 +303,12 @@ func doRequest(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
+}
+
+func newTestRouter(handler *sagaapi.Handler) http.Handler {
+	r := http.NewServeMux()
+	r.HandleFunc("POST /purchases", handler.HandlePurchase)
+	return r
 }
 
 // ---- Purchase flow tests ----
@@ -640,7 +783,7 @@ func TestPurchaseFlow_HandlerPurchaseInitiatesWorkflow(t *testing.T) {
 		purchaseResult: &PrecheckResult{Allowed: true},
 	}
 	payments := &mockPaymentsClient{}
-	h := NewHandler(repo, catalog, payments, pub, 30*time.Second, discardLogger())
+	h := sagaapi.NewHandler(repo, catalog, payments, pub, 30*time.Second, discardLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(PurchaseCommand{

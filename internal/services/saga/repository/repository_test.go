@@ -1,10 +1,28 @@
-package saga
+package repository
 
 import (
 	"context"
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
+)
+
+type (
+	IdempotencyKey = domain.IdempotencyKey
+	SagaInstance   = domain.SagaInstance
+)
+
+const (
+	OutcomeSucceeded = domain.OutcomeSucceeded
+
+	SagaTypeDeposit  = domain.SagaTypeDeposit
+	SagaTypePurchase = domain.SagaTypePurchase
+
+	StatusCompleted = domain.StatusCompleted
+	StatusCreated   = domain.StatusCreated
+	StatusRunning   = domain.StatusRunning
 )
 
 func TestMemoryRepository_CreateSaga(t *testing.T) {

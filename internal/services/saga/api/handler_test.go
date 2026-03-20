@@ -1,4 +1,4 @@
-package saga
+package api
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,7 +17,41 @@ import (
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/workflows"
 )
+
+type (
+	CatalogClient               = client.CatalogClient
+	IdempotencyKey              = domain.IdempotencyKey
+	MemoryRepository            = repository.MemoryRepository
+	PaymentsClient              = client.PaymentsClient
+	PrecheckResult              = client.PrecheckResult
+	RegisterTransactionRequest  = client.RegisterTransactionRequest
+	RegisterTransactionResponse = client.RegisterTransactionResponse
+	Repository                  = repository.Repository
+	SagaInstance                = domain.SagaInstance
+	SagaOutcome                 = domain.SagaOutcome
+	SagaStatus                  = domain.SagaStatus
+	TransactionDetails          = client.TransactionDetails
+)
+
+const (
+	SagaTypeDeposit = domain.SagaTypeDeposit
+	SagaTypeRefund  = domain.SagaTypeRefund
+
+	StatusRunning = domain.StatusRunning
+)
+
+type (
+	DepositPayload  = workflows.DepositPayload
+	PurchasePayload = workflows.PurchasePayload
+	RefundPayload   = workflows.RefundPayload
+)
+
+var NewMemoryRepository = repository.NewMemoryRepository
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -115,6 +150,38 @@ type mockPublisher struct{}
 
 func (m *mockPublisher) Publish(_ context.Context, _, _, _ string, _ any) error {
 	return nil
+}
+
+type publishedMessage struct {
+	Exchange      string
+	RoutingKey    string
+	CorrelationID string
+	Payload       any
+}
+
+type recordingPublisher struct {
+	mu       sync.Mutex
+	messages []publishedMessage
+}
+
+func (p *recordingPublisher) Publish(_ context.Context, exchange, routingKey, correlationID string, payload any) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.messages = append(p.messages, publishedMessage{
+		Exchange:      exchange,
+		RoutingKey:    routingKey,
+		CorrelationID: correlationID,
+		Payload:       payload,
+	})
+	return nil
+}
+
+func (p *recordingPublisher) Messages() []publishedMessage {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	result := make([]publishedMessage, len(p.messages))
+	copy(result, p.messages)
+	return result
 }
 
 type noTransitionRepo struct {

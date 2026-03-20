@@ -1,6 +1,38 @@
-package saga
+package domain_test
 
-import "testing"
+import (
+	"testing"
+
+	sagadomain "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/idempotency"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/workflows"
+)
+
+type DepositPayload = workflows.DepositPayload
+
+var RequestFingerprint = idempotency.RequestFingerprint
+
+type SagaStatus = sagadomain.SagaStatus
+
+const (
+	SagaTypeDeposit  = sagadomain.SagaTypeDeposit
+	SagaTypePurchase = sagadomain.SagaTypePurchase
+	SagaTypeRefund   = sagadomain.SagaTypeRefund
+
+	StatusCompensating           = sagadomain.StatusCompensating
+	StatusCompleted              = sagadomain.StatusCompleted
+	StatusCreated                = sagadomain.StatusCreated
+	StatusFailed                 = sagadomain.StatusFailed
+	StatusReconciliationRequired = sagadomain.StatusReconciliationRequired
+	StatusRunning                = sagadomain.StatusRunning
+	StatusTimedOut               = sagadomain.StatusTimedOut
+)
+
+var (
+	ValidSagaStatus        = sagadomain.ValidSagaStatus
+	ValidSagaType          = sagadomain.ValidSagaType
+	ValidateSagaTransition = sagadomain.ValidateSagaTransition
+)
 
 func TestValidateSagaTransition_LegalTransitions(t *testing.T) {
 	tests := []struct {
