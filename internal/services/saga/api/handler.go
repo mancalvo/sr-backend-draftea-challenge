@@ -1,24 +1,20 @@
 package api
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/activities"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/commanderror"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/idempotency"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/workflows"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/startdeposit"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/startpurchase"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/startrefund"
 )
 
 // DefaultSagaTimeout is the default duration before a saga times out.
@@ -26,12 +22,9 @@ const DefaultSagaTimeout = 30 * time.Second
 
 // Handler provides HTTP handlers for the saga-orchestrator command ingress.
 type Handler struct {
-	repo           repository.Repository
-	catalogClient  client.CatalogClient
-	paymentsClient client.PaymentsClient
-	publisher      activities.Publisher
-	sagaTimeout    time.Duration
-	logger         *slog.Logger
+	startDeposit  *startdeposit.UseCase
+	startPurchase *startpurchase.UseCase
+	startRefund   *startrefund.UseCase
 }
 
 // NewHandler creates a new Handler.
@@ -46,18 +39,31 @@ func NewHandler(
 	if sagaTimeout == 0 {
 		sagaTimeout = DefaultSagaTimeout
 	}
+
+	idempotencyService := idempotency.NewService(repo)
+
 	return &Handler{
-		repo:           repo,
-		catalogClient:  catalogClient,
-		paymentsClient: paymentsClient,
-		publisher:      publisher,
-		sagaTimeout:    sagaTimeout,
-		logger:         logger,
+		startDeposit: startdeposit.New(repo, paymentsClient, publisher, idempotencyService, sagaTimeout),
+		startPurchase: startpurchase.New(
+			repo,
+			catalogClient,
+			paymentsClient,
+			publisher,
+			idempotencyService,
+			sagaTimeout,
+		),
+		startRefund: startrefund.New(
+			repo,
+			catalogClient,
+			paymentsClient,
+			publisher,
+			idempotencyService,
+			sagaTimeout,
+		),
 	}
 }
 
 // HandleDeposit handles POST /deposits.
-// Accepts a deposit command, registers the transaction, creates a saga, and returns 202.
 func (h *Handler) HandleDeposit(w http.ResponseWriter, r *http.Request) {
 	var cmd DepositCommand
 	if err := httpx.Decode(r, &cmd); err != nil {
@@ -73,89 +79,31 @@ func (h *Handler) HandleDeposit(w http.ResponseWriter, r *http.Request) {
 		cmd.Currency = "ARS"
 	}
 
-	logger := logging.FromContext(r.Context()).With(
-		slog.String("user_id", cmd.UserID),
-		slog.String("idempotency_key", cmd.IdempotencyKey),
-	)
-
-	// Compute request fingerprint from the validated, normalized command.
-	scope := string(domain.SagaTypeDeposit)
-	requestHash := idempotency.RequestFingerprint(workflows.DepositPayload{
-		UserID:   cmd.UserID,
-		Amount:   cmd.Amount,
-		Currency: cmd.Currency,
+	result, err := h.startDeposit.Execute(r.Context(), startdeposit.Command{
+		UserID:         cmd.UserID,
+		Amount:         cmd.Amount,
+		Currency:       cmd.Currency,
+		IdempotencyKey: cmd.IdempotencyKey,
 	})
-
-	// Check idempotency.
-	if cached, err := h.checkIdempotency(r, w, scope, cmd.IdempotencyKey, requestHash); cached || err != nil {
+	if writeCommandError(w, err) {
 		return
 	}
-
-	transactionID := uuid.New().String()
-	logger = logger.With(slog.String(logging.KeyTransactionID, transactionID))
-
-	// Step 1: Register transaction in payments (sync).
-	_, err := h.paymentsClient.RegisterTransaction(r.Context(), client.RegisterTransactionRequest{
-		ID:       transactionID,
-		UserID:   cmd.UserID,
-		Type:     "deposit",
-		Amount:   cmd.Amount,
-		Currency: cmd.Currency,
-	})
 	if err != nil {
-		logger.Error("failed to register transaction in payments", "error", err)
-		httpx.Error(w, http.StatusBadGateway, "payment service unavailable")
-		return
-	}
-
-	// Step 2: Create the saga directly in running state with its first step set.
-	payload, _ := json.Marshal(workflows.DepositPayload{
-		UserID:   cmd.UserID,
-		Amount:   cmd.Amount,
-		Currency: cmd.Currency,
-	})
-
-	timeoutAt := time.Now().UTC().Add(h.sagaTimeout)
-	step := workflows.DepositChargeStep
-	sagaInstance, err := h.repo.CreateSaga(r.Context(), &domain.SagaInstance{
-		TransactionID: transactionID,
-		Type:          domain.SagaTypeDeposit,
-		Status:        domain.StatusRunning,
-		CurrentStep:   &step,
-		Payload:       payload,
-		TimeoutAt:     &timeoutAt,
-	})
-	if err != nil {
-		logger.Error("failed to create saga", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-
-	logger.Info("deposit saga created", "saga_id", sagaInstance.ID)
-
-	// Step 3: Publish payments.deposit.requested.
-	if err := activities.PublishDepositRequested(r.Context(), h.publisher, transactionID, messaging.DepositRequested{
-		TransactionID: transactionID,
-		UserID:        cmd.UserID,
-		Amount:        cmd.Amount,
-		Currency:      cmd.Currency,
-	}); err != nil {
-		logger.Error("failed to publish payments.deposit.requested", "error", err)
-		// Saga is already running but command was not sent. The timeout poller
-		// will eventually handle this. We still return 202 since the saga exists.
+	if result.Cached != nil {
+		writeCachedResponse(w, result.Cached)
+		return
 	}
 
-	// Save idempotency key.
-	h.saveIdempotencyKey(r.Context(), scope, cmd.IdempotencyKey, requestHash, transactionID, http.StatusAccepted)
-
 	httpx.JSON(w, http.StatusAccepted, CommandAcceptedResponse{
-		TransactionID: transactionID,
-		Status:        "pending",
+		TransactionID: result.Response.TransactionID,
+		Status:        result.Response.Status,
 	})
 }
 
 // HandlePurchase handles POST /purchases.
-// Validates via catalog-access precheck, registers the transaction, creates a saga, and returns 202.
 func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 	var cmd PurchaseCommand
 	if err := httpx.Decode(r, &cmd); err != nil {
@@ -168,110 +116,30 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger := logging.FromContext(r.Context()).With(
-		slog.String("user_id", cmd.UserID),
-		slog.String("offering_id", cmd.OfferingID),
-		slog.String("idempotency_key", cmd.IdempotencyKey),
-	)
-
-	// Compute request fingerprint from the validated, normalized command.
-	scope := string(domain.SagaTypePurchase)
-	requestHash := idempotency.RequestFingerprint(workflows.PurchasePayload{
-		UserID:     cmd.UserID,
-		OfferingID: cmd.OfferingID,
+	result, err := h.startPurchase.Execute(r.Context(), startpurchase.Command{
+		UserID:         cmd.UserID,
+		OfferingID:     cmd.OfferingID,
+		IdempotencyKey: cmd.IdempotencyKey,
 	})
-
-	// Check idempotency.
-	if cached, err := h.checkIdempotency(r, w, scope, cmd.IdempotencyKey, requestHash); cached || err != nil {
+	if writeCommandError(w, err) {
 		return
 	}
-
-	// Step 1: Purchase precheck (sync, fail-fast).
-	precheck, err := h.catalogClient.PurchasePrecheck(r.Context(), cmd.UserID, cmd.OfferingID)
 	if err != nil {
-		logger.Error("purchase precheck failed", "error", err)
-		httpx.Error(w, http.StatusBadGateway, "catalog service unavailable")
-		return
-	}
-	if !precheck.Allowed {
-		logger.Info("purchase precheck denied", "reason", precheck.Reason)
-		httpx.ErrorWithCode(w, http.StatusUnprocessableEntity, precheck.Reason, "PRECHECK_DENIED")
-		return
-	}
-	if precheck.Price <= 0 || precheck.Currency == "" {
-		logger.Error("purchase precheck returned invalid pricing", "price", precheck.Price, "currency", precheck.Currency)
-		httpx.Error(w, http.StatusBadGateway, "catalog service unavailable")
-		return
-	}
-
-	transactionID := uuid.New().String()
-	logger = logger.With(slog.String(logging.KeyTransactionID, transactionID))
-
-	// Step 2: Register transaction in payments (sync).
-	_, err = h.paymentsClient.RegisterTransaction(r.Context(), client.RegisterTransactionRequest{
-		ID:         transactionID,
-		UserID:     cmd.UserID,
-		Type:       "purchase",
-		Amount:     precheck.Price,
-		Currency:   precheck.Currency,
-		OfferingID: &cmd.OfferingID,
-	})
-	if err != nil {
-		logger.Error("failed to register transaction in payments", "error", err)
-		httpx.Error(w, http.StatusBadGateway, "payment service unavailable")
-		return
-	}
-
-	// Step 3: Create the saga directly in running state with its first step set.
-	payload, _ := json.Marshal(workflows.PurchasePayload{
-		UserID:     cmd.UserID,
-		OfferingID: cmd.OfferingID,
-		Amount:     precheck.Price,
-		Currency:   precheck.Currency,
-	})
-
-	timeoutAt := time.Now().UTC().Add(h.sagaTimeout)
-	step := workflows.PurchaseDebitStep
-	sagaInstance, err := h.repo.CreateSaga(r.Context(), &domain.SagaInstance{
-		TransactionID: transactionID,
-		Type:          domain.SagaTypePurchase,
-		Status:        domain.StatusRunning,
-		CurrentStep:   &step,
-		Payload:       payload,
-		TimeoutAt:     &timeoutAt,
-	})
-	if err != nil {
-		logger.Error("failed to create saga", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-
-	logger.Info("purchase saga created", "saga_id", sagaInstance.ID)
-
-	// Step 4: Publish wallet.debit.requested.
-	if err := activities.PublishWalletDebitRequested(r.Context(), h.publisher, transactionID, messaging.WalletDebitRequested{
-		TransactionID: transactionID,
-		UserID:        cmd.UserID,
-		Amount:        precheck.Price,
-		Currency:      precheck.Currency,
-		SourceStep:    step,
-	}); err != nil {
-		logger.Error("failed to publish wallet.debit.requested", "error", err)
-		// Saga is already running but command was not sent. The timeout poller
-		// will eventually handle this. We still return 202 since the saga exists.
+	if result.Cached != nil {
+		writeCachedResponse(w, result.Cached)
+		return
 	}
 
-	// Save idempotency key.
-	h.saveIdempotencyKey(r.Context(), scope, cmd.IdempotencyKey, requestHash, transactionID, http.StatusAccepted)
-
 	httpx.JSON(w, http.StatusAccepted, CommandAcceptedResponse{
-		TransactionID: transactionID,
-		Status:        "pending",
+		TransactionID: result.Response.TransactionID,
+		Status:        result.Response.Status,
 	})
 }
 
 // HandleRefund handles POST /refunds.
-// Validates via catalog-access refund precheck, registers the transaction, creates a saga, and returns 202.
 func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 	var cmd RefundCommand
 	if err := httpx.Decode(r, &cmd); err != nil {
@@ -284,185 +152,56 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger := logging.FromContext(r.Context()).With(
-		slog.String("user_id", cmd.UserID),
-		slog.String("offering_id", cmd.OfferingID),
-		slog.String("original_transaction_id", cmd.TransactionID),
-		slog.String("idempotency_key", cmd.IdempotencyKey),
-	)
-
-	// Compute request fingerprint from the validated, normalized command.
-	scope := string(domain.SagaTypeRefund)
-	requestHash := idempotency.RequestFingerprint(workflows.RefundPayload{
-		UserID:              cmd.UserID,
-		OfferingID:          cmd.OfferingID,
-		OriginalTransaction: cmd.TransactionID,
+	result, err := h.startRefund.Execute(r.Context(), startrefund.Command{
+		UserID:         cmd.UserID,
+		OfferingID:     cmd.OfferingID,
+		TransactionID:  cmd.TransactionID,
+		IdempotencyKey: cmd.IdempotencyKey,
 	})
-
-	// Check idempotency.
-	if cached, err := h.checkIdempotency(r, w, scope, cmd.IdempotencyKey, requestHash); cached || err != nil {
+	if writeCommandError(w, err) {
 		return
 	}
-
-	// Step 1: Refund precheck (sync, fail-fast).
-	precheck, err := h.catalogClient.RefundPrecheck(r.Context(), cmd.UserID, cmd.OfferingID, cmd.TransactionID)
 	if err != nil {
-		logger.Error("refund precheck failed", "error", err)
-		httpx.Error(w, http.StatusBadGateway, "catalog service unavailable")
-		return
-	}
-	if !precheck.Allowed {
-		logger.Info("refund precheck denied", "reason", precheck.Reason)
-		httpx.ErrorWithCode(w, http.StatusUnprocessableEntity, precheck.Reason, "PRECHECK_DENIED")
-		return
-	}
-
-	originalTxn, err := h.paymentsClient.GetTransaction(r.Context(), cmd.TransactionID)
-	if err != nil {
-		logger.Error("failed to fetch original transaction", "error", err)
-		httpx.Error(w, http.StatusBadGateway, "payment service unavailable")
-		return
-	}
-	if originalTxn.Type != "purchase" {
-		httpx.ErrorWithCode(w, http.StatusUnprocessableEntity, "original transaction must be a purchase", "INVALID_ORIGINAL_TRANSACTION")
-		return
-	}
-	if originalTxn.UserID != cmd.UserID {
-		httpx.ErrorWithCode(w, http.StatusUnprocessableEntity, "original transaction does not belong to user", "INVALID_ORIGINAL_TRANSACTION")
-		return
-	}
-	if originalTxn.OfferingID == nil || *originalTxn.OfferingID != cmd.OfferingID {
-		httpx.ErrorWithCode(w, http.StatusUnprocessableEntity, "original transaction does not match offering", "INVALID_ORIGINAL_TRANSACTION")
-		return
-	}
-	if originalTxn.Amount <= 0 || originalTxn.Currency == "" {
-		httpx.ErrorWithCode(w, http.StatusUnprocessableEntity, "original transaction has invalid amount", "INVALID_ORIGINAL_TRANSACTION")
-		return
-	}
-
-	transactionID := uuid.New().String()
-	logger = logger.With(slog.String(logging.KeyTransactionID, transactionID))
-
-	// Step 2: Register transaction in payments (sync).
-	_, err = h.paymentsClient.RegisterTransaction(r.Context(), client.RegisterTransactionRequest{
-		ID:                    transactionID,
-		UserID:                cmd.UserID,
-		Type:                  "refund",
-		Amount:                originalTxn.Amount,
-		Currency:              originalTxn.Currency,
-		OfferingID:            &cmd.OfferingID,
-		OriginalTransactionID: &cmd.TransactionID,
-	})
-	if err != nil {
-		logger.Error("failed to register transaction in payments", "error", err)
-		httpx.Error(w, http.StatusBadGateway, "payment service unavailable")
-		return
-	}
-
-	// Step 3: Create the saga directly in running state with its first step set.
-	payload, _ := json.Marshal(workflows.RefundPayload{
-		UserID:              cmd.UserID,
-		OfferingID:          cmd.OfferingID,
-		OriginalTransaction: cmd.TransactionID,
-		Amount:              originalTxn.Amount,
-		Currency:            originalTxn.Currency,
-	})
-
-	timeoutAt := time.Now().UTC().Add(h.sagaTimeout)
-	step := workflows.RefundRevokeAccessStep
-	sagaInstance, err := h.repo.CreateSaga(r.Context(), &domain.SagaInstance{
-		TransactionID: transactionID,
-		Type:          domain.SagaTypeRefund,
-		Status:        domain.StatusRunning,
-		CurrentStep:   &step,
-		Payload:       payload,
-		TimeoutAt:     &timeoutAt,
-	})
-	if err != nil {
-		logger.Error("failed to create saga", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-
-	logger.Info("refund saga created", "saga_id", sagaInstance.ID)
-
-	// Step 4: Publish access.revoke.requested.
-	if err := activities.PublishAccessRevokeRequested(r.Context(), h.publisher, transactionID, messaging.AccessRevokeRequested{
-		TransactionID: cmd.TransactionID,
-		UserID:        cmd.UserID,
-		OfferingID:    cmd.OfferingID,
-	}); err != nil {
-		logger.Error("failed to publish access.revoke.requested", "error", err)
-		// Saga is already running but command was not sent. The timeout poller
-		// will eventually handle this. We still return 202 since the saga exists.
+	if result.Cached != nil {
+		writeCachedResponse(w, result.Cached)
+		return
 	}
-
-	// Save idempotency key.
-	h.saveIdempotencyKey(r.Context(), scope, cmd.IdempotencyKey, requestHash, transactionID, http.StatusAccepted)
 
 	httpx.JSON(w, http.StatusAccepted, CommandAcceptedResponse{
-		TransactionID: transactionID,
-		Status:        "pending",
+		TransactionID: result.Response.TransactionID,
+		Status:        result.Response.Status,
 	})
 }
 
-// checkIdempotency checks if the idempotency key has been seen before.
-// Returns (true, nil) if a cached response was sent or a conflict was returned.
-// Returns (false, nil) if no cached entry exists and the caller should proceed.
-// Returns (false, error) if there was an internal error (already written to w).
-func (h *Handler) checkIdempotency(r *http.Request, w http.ResponseWriter, scope, key, requestHash string) (bool, error) {
-	cached, err := h.repo.GetIdempotencyKey(r.Context(), scope, key)
-	if errors.Is(err, repository.ErrNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		h.logger.Error("failed to check idempotency key", "error", err, "key", key, "scope", scope)
-		httpx.Error(w, http.StatusInternalServerError, "internal server error")
-		return false, err
+func writeCommandError(w http.ResponseWriter, err error) bool {
+	if err == nil {
+		return false
 	}
 
-	// Same scope+key but different payload hash -> conflict.
-	if cached.RequestHash != requestHash {
-		httpx.ErrorWithCode(w, http.StatusConflict,
-			"idempotency key already used with a different request payload",
-			"IDEMPOTENCY_MISMATCH")
-		return true, nil
+	var commandErr *commanderror.Error
+	if !errors.As(err, &commandErr) {
+		return false
 	}
 
-	// Replay the cached response.
+	if commandErr.HTTPCode() == "" {
+		httpx.Error(w, commandErr.HTTPStatus(), commandErr.HTTPMessage())
+		return true
+	}
+
+	httpx.ErrorWithCode(w, commandErr.HTTPStatus(), commandErr.HTTPMessage(), commandErr.HTTPCode())
+	return true
+}
+
+func writeCachedResponse(w http.ResponseWriter, replay *idempotency.Replay) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(cached.ResponseStatus)
-	if cached.ResponseBody != nil {
-		w.Write(cached.ResponseBody)
-	}
-	return true, nil
-}
-
-// saveIdempotencyKey stores the accepted response so duplicates get the same result.
-func (h *Handler) saveIdempotencyKey(ctx context.Context, scope, key, requestHash, transactionID string, status int) {
-	respBody, _ := json.Marshal(httpx.Response{
-		Success: true,
-		Data: CommandAcceptedResponse{
-			TransactionID: transactionID,
-			Status:        "pending",
-		},
-	})
-
-	ik := &domain.IdempotencyKey{
-		Key:            key,
-		Scope:          scope,
-		RequestHash:    requestHash,
-		TransactionID:  transactionID,
-		ResponseStatus: status,
-		ResponseBody:   respBody,
-		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
-	}
-	if err := h.repo.SaveIdempotencyKey(ctx, ik); err != nil && !errors.Is(err, repository.ErrIdempotencyKeyExists) {
-		h.logger.Error("failed to save idempotency key", "error", err, "key", key, "scope", scope)
+	w.WriteHeader(replay.StatusCode)
+	if replay.Body != nil {
+		_, _ = w.Write(replay.Body)
 	}
 }
-
-// ---- Validation helpers ----
 
 // validateDepositCommand returns field-level validation errors for a deposit command.
 func validateDepositCommand(cmd *DepositCommand) []httpx.FieldError {
