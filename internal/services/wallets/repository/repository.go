@@ -236,22 +236,6 @@ func (r *PostgresRepository) findExistingMovement(ctx context.Context, tx *sql.T
 	return &mv, nil
 }
 
-func (r *PostgresRepository) getWalletInTx(ctx context.Context, tx *sql.Tx, userID string) (*domain.Wallet, error) {
-	const q = `SELECT id, user_id, balance, currency, created_at, updated_at
-		FROM wallets.wallets WHERE user_id = $1`
-	var w domain.Wallet
-	err := tx.QueryRowContext(ctx, q, userID).Scan(
-		&w.ID, &w.UserID, &w.Balance, &w.Currency, &w.CreatedAt, &w.UpdatedAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrWalletNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get wallet in tx: %w", err)
-	}
-	return &w, nil
-}
-
 // MemoryRepository is an in-memory implementation of Repository for unit tests.
 // It simulates the atomic debit/credit behavior with mutex-based locking.
 type MemoryRepository struct {
