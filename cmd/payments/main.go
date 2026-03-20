@@ -63,35 +63,12 @@ func main() {
 	}
 	defer rmqConn.Close()
 
-	// Declare RabbitMQ topology (idempotent)
-	topoCh, err := rmqConn.Channel()
+	rmqRuntime, err := rabbitmq.OpenRuntime(rmqConn, logger, rabbitmq.DefaultRetryConfig())
 	if err != nil {
-		logger.Error("failed to open topology channel", "error", err)
+		logger.Error("failed to initialize RabbitMQ runtime", "error", err)
 		os.Exit(1)
 	}
-	if err := rabbitmq.DeclareTopology(topoCh, rabbitmq.DefaultTopology(), logger); err != nil {
-		logger.Error("failed to declare topology", "error", err)
-		os.Exit(1)
-	}
-	topoCh.Close()
-
-	// Publisher channel
-	pubCh, err := rmqConn.Channel()
-	if err != nil {
-		logger.Error("failed to open publisher channel", "error", err)
-		os.Exit(1)
-	}
-	defer pubCh.Close()
-	publisher := rabbitmq.NewPublisher(pubCh, logger)
-
-	// Consumer channel
-	consCh, err := rmqConn.Channel()
-	if err != nil {
-		logger.Error("failed to open consumer channel", "error", err)
-		os.Exit(1)
-	}
-	defer consCh.Close()
-	consumer := rabbitmq.NewConsumer(consCh, logger, rabbitmq.DefaultRetryConfig())
+	defer rmqRuntime.Close()
 
 	// Provider (mock implementation for local development)
 	providerTimeout := config.GetEnvDuration("PROVIDER_CHARGE_TIMEOUT", 30*time.Second)
@@ -100,7 +77,7 @@ func main() {
 
 	// Handlers
 	httpHandler := paymentsapi.NewHandler(paymentsservice.New(repo), logger)
-	amqpHandler := paymentsconsumer.NewHandler(processdeposit.New(provider, publisher, logger), logger)
+	amqpHandler := paymentsconsumer.NewHandler(processdeposit.New(provider, rmqRuntime.Publisher, logger), logger)
 
 	// HTTP server with readiness checks
 	router := paymentsapi.NewRouter(httpHandler, logger,
@@ -122,7 +99,7 @@ func main() {
 	}, lifecycle.Task{
 		Name: "consumer",
 		Run: func(ctx context.Context) error {
-			return consumer.Consume(ctx, messaging.QueuePaymentsCommands, amqpHandler.Handle)
+			return rmqRuntime.Consumer.Consume(ctx, messaging.QueuePaymentsCommands, amqpHandler.Handle)
 		},
 	}); err != nil {
 		logger.Error("service lifecycle failed", "error", err)

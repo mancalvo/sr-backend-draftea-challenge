@@ -62,35 +62,12 @@ func main() {
 	}
 	defer rmqConn.Close()
 
-	// Declare RabbitMQ topology (idempotent)
-	topoCh, err := rmqConn.Channel()
+	rmqRuntime, err := rabbitmq.OpenRuntime(rmqConn, logger, rabbitmq.DefaultRetryConfig())
 	if err != nil {
-		logger.Error("failed to open topology channel", "error", err)
+		logger.Error("failed to initialize RabbitMQ runtime", "error", err)
 		os.Exit(1)
 	}
-	if err := rabbitmq.DeclareTopology(topoCh, rabbitmq.DefaultTopology(), logger); err != nil {
-		logger.Error("failed to declare topology", "error", err)
-		os.Exit(1)
-	}
-	topoCh.Close()
-
-	// Publisher channel
-	pubCh, err := rmqConn.Channel()
-	if err != nil {
-		logger.Error("failed to open publisher channel", "error", err)
-		os.Exit(1)
-	}
-	defer pubCh.Close()
-	publisher := rabbitmq.NewPublisher(pubCh, logger)
-
-	// Consumer channel
-	consCh, err := rmqConn.Channel()
-	if err != nil {
-		logger.Error("failed to open consumer channel", "error", err)
-		os.Exit(1)
-	}
-	defer consCh.Close()
-	consumer := rabbitmq.NewConsumer(consCh, logger, rabbitmq.DefaultRetryConfig())
+	defer rmqRuntime.Close()
 
 	// Sync HTTP clients
 	syncTimeout := config.GetEnvDuration("SYNC_HTTP_TIMEOUT", 2*time.Second)
@@ -105,8 +82,8 @@ func main() {
 	pollInterval := config.GetEnvDuration("TIMEOUT_POLL_INTERVAL", 5*time.Second)
 
 	// Handlers
-	httpHandler := sagaapi.NewHandler(repo, catalogClient, paymentsClient, publisher, sagaTimeout, logger)
-	amqpHandler := sagaconsumer.NewHandler(repo, paymentsClient, publisher, logger)
+	httpHandler := sagaapi.NewHandler(repo, catalogClient, paymentsClient, rmqRuntime.Publisher, sagaTimeout, logger)
+	amqpHandler := sagaconsumer.NewHandler(repo, paymentsClient, rmqRuntime.Publisher, logger)
 
 	// Timeout poller
 	timeoutPoller := timeoutusecase.NewTimeoutPoller(repo, paymentsClient, timeoutusecase.TimeoutConfig{
@@ -134,7 +111,7 @@ func main() {
 	}, lifecycle.Task{
 		Name: "consumer",
 		Run: func(ctx context.Context) error {
-			return consumer.Consume(ctx, messaging.QueueSagaOutcomes, amqpHandler.Handle)
+			return rmqRuntime.Consumer.Consume(ctx, messaging.QueueSagaOutcomes, amqpHandler.Handle)
 		},
 	}, lifecycle.Task{
 		Name: "timeout-poller",
