@@ -17,6 +17,7 @@ import (
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/activities"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/commanderror"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/idempotency"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/workflows"
@@ -98,7 +99,6 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 	})
 
 	transactionID := uuid.New().String()
-	logger = logger.With(slog.String(logging.KeyTransactionID, transactionID))
 
 	reservation, err := u.idempotency.Reserve(ctx, scope, cmd.IdempotencyKey, requestHash, transactionID)
 	if err != nil {
@@ -114,6 +114,8 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 	if reservation.Replay != nil {
 		return &Result{Cached: reservation.Replay}, nil
 	}
+	transactionID = reservation.TransactionID
+	logger = logger.With(slog.String(logging.KeyTransactionID, transactionID))
 
 	_, err = u.payments.RegisterTransaction(ctx, client.RegisterTransactionRequest{
 		ID:       transactionID,
@@ -123,8 +125,12 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 		Currency: cmd.Currency,
 	})
 	if err != nil {
-		logger.Error("failed to register transaction in payments", "error", err)
-		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "payment service unavailable", ""))
+		if errors.Is(err, client.ErrDuplicateTransaction) {
+			logger.Info("deposit transaction already exists, resuming dispatch")
+		} else {
+			logger.Error("failed to register transaction in payments", "error", err)
+			return nil, u.retryableCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "payment service unavailable", ""))
+		}
 	}
 
 	payload, err := json.Marshal(workflows.DepositPayload{
@@ -148,11 +154,15 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 		TimeoutAt:     &timeoutAt,
 	})
 	if err != nil {
-		logger.Error("failed to create saga", "error", err)
-		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusInternalServerError, "internal server error", ""))
+		if errors.Is(err, repository.ErrDuplicateTransaction) {
+			logger.Info("deposit saga already exists, resuming dispatch")
+		} else {
+			logger.Error("failed to create saga", "error", err)
+			return nil, u.retryableCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusInternalServerError, "internal server error", ""))
+		}
+	} else {
+		logger.Info("deposit saga created", "saga_id", sagaInstance.ID)
 	}
-
-	logger.Info("deposit saga created", "saga_id", sagaInstance.ID)
 
 	if err := activities.PublishDepositRequested(ctx, u.publisher, transactionID, messaging.DepositRequested{
 		TransactionID: transactionID,
@@ -161,7 +171,7 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 		Currency:      cmd.Currency,
 	}); err != nil {
 		logger.Error("failed to publish payments.deposit.requested", "error", err)
-		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "failed to dispatch deposit command", "INITIAL_DISPATCH_FAILED"))
+		return nil, u.retryableCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "failed to dispatch deposit command", "INITIAL_DISPATCH_FAILED"))
 	}
 
 	response := AcceptedResponse{
@@ -189,6 +199,13 @@ func (u *UseCase) finalizeCommandError(ctx context.Context, scope, key string, e
 		if finalizeErr := u.idempotency.Finalize(ctx, scope, key, err.HTTPStatus(), body); finalizeErr != nil {
 			logging.FromContext(ctx).Error("failed to finalize idempotency error response", "error", finalizeErr, "scope", scope, "key", key)
 		}
+	}
+	return err
+}
+
+func (u *UseCase) retryableCommandError(ctx context.Context, scope, key string, err *commanderror.Error) *commanderror.Error {
+	if markErr := u.idempotency.MarkRetryable(ctx, scope, key); markErr != nil {
+		logging.FromContext(ctx).Error("failed to mark idempotency key retryable", "error", markErr, "scope", scope, "key", key)
 	}
 	return err
 }

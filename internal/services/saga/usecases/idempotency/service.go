@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
 	"time"
 )
 
@@ -18,9 +17,9 @@ var ErrInProgress = errors.New("idempotency key is already being processed")
 
 // Repository defines the idempotency persistence needed by the service.
 type Repository interface {
-	GetIdempotencyKey(ctx context.Context, scope, key string) (*domain.IdempotencyKey, error)
-	SaveIdempotencyKey(ctx context.Context, key *domain.IdempotencyKey) error
-	FinalizeIdempotencyKey(ctx context.Context, scope, key string, status int, body json.RawMessage) error
+	ReserveIdempotencyKey(ctx context.Context, key *domain.IdempotencyKey, processingTTL time.Duration) (*domain.IdempotencyKey, bool, error)
+	FinalizeIdempotencyKey(ctx context.Context, scope, key string, status int, body json.RawMessage, completedTTL time.Duration) error
+	MarkIdempotencyKeyRetryable(ctx context.Context, scope, key string) error
 }
 
 // Replay is a previously persisted response to be replayed verbatim.
@@ -31,13 +30,19 @@ type Replay struct {
 
 // Reservation is the outcome of trying to claim an idempotency key.
 type Reservation struct {
-	Replay *Replay
+	TransactionID string
+	Replay        *Replay
 }
 
 // Service manages command idempotency for saga ingress.
 type Service struct {
 	repo Repository
 }
+
+const (
+	processingTTL = 30 * time.Second
+	completedTTL  = 24 * time.Hour
+)
 
 // NewService creates a new idempotency service.
 func NewService(repo Repository) *Service {
@@ -52,18 +57,15 @@ func (s *Service) Reserve(ctx context.Context, scope, key, requestHash, transact
 		RequestHash:   requestHash,
 		TransactionID: transactionID,
 		State:         domain.IdempotencyStateProcessing,
-		ExpiresAt:     time.Now().UTC().Add(24 * time.Hour),
+		ExpiresAt:     time.Now().UTC().Add(processingTTL),
 	}
 
-	if err := s.repo.SaveIdempotencyKey(ctx, ik); err == nil {
-		return &Reservation{}, nil
-	} else if !errors.Is(err, repository.ErrIdempotencyKeyExists) {
+	cached, reserved, err := s.repo.ReserveIdempotencyKey(ctx, ik, processingTTL)
+	if err != nil {
 		return nil, fmt.Errorf("reserve idempotency key: %w", err)
 	}
-
-	cached, err := s.repo.GetIdempotencyKey(ctx, scope, key)
-	if err != nil {
-		return nil, fmt.Errorf("check idempotency key: %w", err)
+	if reserved {
+		return &Reservation{TransactionID: cached.TransactionID}, nil
 	}
 	if cached.RequestHash != requestHash {
 		return nil, ErrMismatch
@@ -72,6 +74,7 @@ func (s *Service) Reserve(ctx context.Context, scope, key, requestHash, transact
 		return nil, ErrInProgress
 	}
 	return &Reservation{
+		TransactionID: cached.TransactionID,
 		Replay: &Replay{
 			StatusCode: cached.ResponseStatus,
 			Body:       cached.ResponseBody,
@@ -81,8 +84,16 @@ func (s *Service) Reserve(ctx context.Context, scope, key, requestHash, transact
 
 // Finalize stores the final response for a reserved key so retries replay it.
 func (s *Service) Finalize(ctx context.Context, scope, key string, status int, body []byte) error {
-	if err := s.repo.FinalizeIdempotencyKey(ctx, scope, key, status, json.RawMessage(body)); err != nil {
+	if err := s.repo.FinalizeIdempotencyKey(ctx, scope, key, status, json.RawMessage(body), completedTTL); err != nil {
 		return fmt.Errorf("finalize idempotency key: %w", err)
+	}
+	return nil
+}
+
+// MarkRetryable releases an in-progress reservation so a retry can reclaim it.
+func (s *Service) MarkRetryable(ctx context.Context, scope, key string) error {
+	if err := s.repo.MarkIdempotencyKeyRetryable(ctx, scope, key); err != nil {
+		return fmt.Errorf("mark idempotency key retryable: %w", err)
 	}
 	return nil
 }

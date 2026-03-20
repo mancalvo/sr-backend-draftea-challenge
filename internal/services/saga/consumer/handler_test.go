@@ -466,17 +466,19 @@ func TestPurchaseFlow_DuplicateWalletOutcomeRedelivery(t *testing.T) {
 	if len(pub.Messages()) != 1 {
 		t.Fatalf("expected 1 message after first delivery, got %d", len(pub.Messages()))
 	}
+	updated, _ := repo.GetSagaByID(ctx, s.ID)
+	if updated.CurrentStep == nil || *updated.CurrentStep != "purchase_grant" {
+		t.Fatalf("current_step = %v, want purchase_grant", updated.CurrentStep)
+	}
 
 	// Second delivery (duplicate) of the same wallet.debited.
 	if err := handler.HandleOutcome(ctx, env); err != nil {
 		t.Fatalf("second handleWalletDebited: %v", err)
 	}
+	if len(pub.Messages()) != 1 {
+		t.Fatalf("expected duplicate wallet.debited to be ignored, got %d messages", len(pub.Messages()))
+	}
 
-	// Should still have only 1 published message (duplicate was idempotently ignored
-	// because the saga was already at running/purchase_grant and the UpdateSagaStatus
-	// for running->running with a different step will still work, but ideally we'd
-	// see no extra command).
-	// The key check: the saga should still be in running state, not broken.
 	final, _ := repo.GetSagaByID(ctx, s.ID)
 	if final.Status != StatusRunning {
 		t.Errorf("saga status = %s, want running", final.Status)
@@ -1120,16 +1122,21 @@ func TestRefundFlow_DuplicateRevokeEventHandling(t *testing.T) {
 	if len(pub.Messages()) != 1 {
 		t.Fatalf("expected 1 message after first delivery, got %d", len(pub.Messages()))
 	}
+	updated, _ := repo.GetSagaByID(ctx, s.ID)
+	if updated.CurrentStep == nil || *updated.CurrentStep != "refund_credit" {
+		t.Fatalf("current_step = %v, want refund_credit", updated.CurrentStep)
+	}
 
 	// Second delivery (duplicate) of access.revoked -> should not error.
-	// The saga is still running (at refund_credit step), so the UpdateSagaStatus
-	// running->running is a no-op transition that may be rejected.
 	if err := handler.HandleOutcome(ctx, env); err != nil {
 		t.Fatalf("second handleAccessRevoked: %v", err)
 	}
+	if len(pub.Messages()) != 1 {
+		t.Fatalf("expected duplicate access.revoked to be ignored, got %d messages", len(pub.Messages()))
+	}
 
 	// Saga should still be running.
-	updated, _ := repo.GetSagaByID(ctx, s.ID)
+	updated, _ = repo.GetSagaByID(ctx, s.ID)
 	if updated.Status != StatusRunning {
 		t.Errorf("saga status = %s, want running", updated.Status)
 	}
@@ -1308,6 +1315,9 @@ func TestDepositFlow_HappyPath(t *testing.T) {
 	updated, _ := repo.GetSagaByID(ctx, s.ID)
 	if updated.Status != StatusRunning {
 		t.Errorf("saga status = %s, want running", updated.Status)
+	}
+	if updated.CurrentStep == nil || *updated.CurrentStep != "deposit_credit" {
+		t.Errorf("current_step = %v, want deposit_credit", updated.CurrentStep)
 	}
 
 	// Step 2: wallet.credited -> should complete the saga.

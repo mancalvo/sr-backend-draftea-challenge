@@ -501,16 +501,16 @@ func TestHandleDeposit_IdempotencyInProgress(t *testing.T) {
 	}
 }
 
-func TestHandleDeposit_InitialDispatchFailure_ReplaysFailure(t *testing.T) {
+func TestHandleDeposit_InitialDispatchFailure_IsRetryable(t *testing.T) {
 	repo := NewMemoryRepository()
 	payments := &mockPaymentsClient{}
-	handler := newTestHandlerWithPublisher(
+	failingHandler := newTestHandlerWithPublisher(
 		repo,
 		&mockCatalogClient{},
 		payments,
 		&failingPublisher{err: errors.New("broker unavailable")},
 	)
-	router := newTestRouter(handler)
+	failingRouter := newTestRouter(failingHandler)
 
 	body := mustJSON(t, DepositCommand{
 		UserID:         "user-1",
@@ -522,7 +522,7 @@ func TestHandleDeposit_InitialDispatchFailure_ReplaysFailure(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	first := httptest.NewRecorder()
-	router.ServeHTTP(first, req)
+	failingRouter.ServeHTTP(first, req)
 
 	if first.Code != http.StatusBadGateway {
 		t.Fatalf("first: status = %d, want %d; body: %s", first.Code, http.StatusBadGateway, first.Body.String())
@@ -536,19 +536,35 @@ func TestHandleDeposit_InitialDispatchFailure_ReplaysFailure(t *testing.T) {
 		t.Fatalf("expected INITIAL_DISPATCH_FAILED, got %+v", firstResp.Error)
 	}
 
+	recoveringPublisher := &recordingPublisher{}
+	retryHandler := newTestHandlerWithPublisher(repo, &mockCatalogClient{}, payments, recoveringPublisher)
+	retryRouter := newTestRouter(retryHandler)
+
 	req = httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	second := httptest.NewRecorder()
-	router.ServeHTTP(second, req)
+	retryRouter.ServeHTTP(second, req)
 
-	if second.Code != http.StatusBadGateway {
-		t.Fatalf("second: status = %d, want %d; body: %s", second.Code, http.StatusBadGateway, second.Body.String())
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("second: status = %d, want %d; body: %s", second.Code, http.StatusAccepted, second.Body.String())
 	}
-	if first.Body.String() != second.Body.String() {
-		t.Fatalf("cached failure mismatch:\nfirst=%s\nsecond=%s", first.Body.String(), second.Body.String())
+	var secondResp httpx.Response
+	if err := json.NewDecoder(bytes.NewReader(second.Body.Bytes())).Decode(&secondResp); err != nil {
+		t.Fatalf("decode second response: %v", err)
 	}
-	if len(payments.RegisterCalls()) != 1 {
-		t.Fatalf("register calls = %d, want 1", len(payments.RegisterCalls()))
+	secondData := secondResp.Data.(map[string]any)
+	if secondData["transaction_id"] == nil || secondData["transaction_id"] == "" {
+		t.Fatalf("retry response missing transaction_id: %s", second.Body.String())
+	}
+	registerCalls := payments.RegisterCalls()
+	if len(registerCalls) != 2 {
+		t.Fatalf("register calls = %d, want 2", len(registerCalls))
+	}
+	if registerCalls[0].ID != registerCalls[1].ID {
+		t.Fatalf("retry should reuse transaction_id, got %s then %s", registerCalls[0].ID, registerCalls[1].ID)
+	}
+	if len(recoveringPublisher.Messages()) != 1 {
+		t.Fatalf("expected retry to publish exactly once after recovery, got %d", len(recoveringPublisher.Messages()))
 	}
 }
 
@@ -666,6 +682,47 @@ func TestHandlePurchase_CatalogUnavailable_FailFast(t *testing.T) {
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+}
+
+func TestHandlePurchase_CatalogUnavailable_IsRetryable(t *testing.T) {
+	repo := NewMemoryRepository()
+	body := mustJSON(t, PurchaseCommand{
+		UserID:         "user-1",
+		OfferingID:     "offering-1",
+		IdempotencyKey: "pur-key-retryable-catalog",
+	})
+
+	failingHandler := newTestHandler(
+		repo,
+		&mockCatalogClient{purchaseErr: errors.New("connection refused")},
+		&mockPaymentsClient{},
+	)
+	failingRouter := newTestRouter(failingHandler)
+
+	firstReq := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
+	firstReq.Header.Set("Content-Type", "application/json")
+	first := httptest.NewRecorder()
+	failingRouter.ServeHTTP(first, firstReq)
+
+	if first.Code != http.StatusBadGateway {
+		t.Fatalf("first: status = %d, want %d; body: %s", first.Code, http.StatusBadGateway, first.Body.String())
+	}
+
+	retryingHandler := newTestHandler(
+		repo,
+		&mockCatalogClient{purchaseResult: &PrecheckResult{Allowed: true}},
+		&mockPaymentsClient{},
+	)
+	retryingRouter := newTestRouter(retryingHandler)
+
+	secondReq := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
+	secondReq.Header.Set("Content-Type", "application/json")
+	second := httptest.NewRecorder()
+	retryingRouter.ServeHTTP(second, secondReq)
+
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("second: status = %d, want %d; body: %s", second.Code, http.StatusAccepted, second.Body.String())
 	}
 }
 

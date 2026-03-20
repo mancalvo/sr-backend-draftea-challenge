@@ -17,6 +17,7 @@ import (
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/activities"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/commanderror"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/idempotency"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/workflows"
@@ -105,7 +106,6 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 	})
 
 	transactionID := uuid.New().String()
-	logger = logger.With(slog.String(logging.KeyTransactionID, transactionID))
 
 	reservation, err := u.idempotency.Reserve(ctx, scope, cmd.IdempotencyKey, requestHash, transactionID)
 	if err != nil {
@@ -121,11 +121,13 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 	if reservation.Replay != nil {
 		return &Result{Cached: reservation.Replay}, nil
 	}
+	transactionID = reservation.TransactionID
+	logger = logger.With(slog.String(logging.KeyTransactionID, transactionID))
 
 	precheck, err := u.catalog.PurchasePrecheck(ctx, cmd.UserID, cmd.OfferingID)
 	if err != nil {
 		logger.Error("purchase precheck failed", "error", err)
-		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "catalog service unavailable", ""))
+		return nil, u.retryableCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "catalog service unavailable", ""))
 	}
 	if !precheck.Allowed {
 		logger.Info("purchase precheck denied", "reason", precheck.Reason)
@@ -133,7 +135,7 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 	}
 	if precheck.Price <= 0 || precheck.Currency == "" {
 		logger.Error("purchase precheck returned invalid pricing", "price", precheck.Price, "currency", precheck.Currency)
-		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "catalog service unavailable", ""))
+		return nil, u.retryableCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "catalog service unavailable", ""))
 	}
 
 	_, err = u.payments.RegisterTransaction(ctx, client.RegisterTransactionRequest{
@@ -145,8 +147,12 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 		OfferingID: &cmd.OfferingID,
 	})
 	if err != nil {
-		logger.Error("failed to register transaction in payments", "error", err)
-		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "payment service unavailable", ""))
+		if errors.Is(err, client.ErrDuplicateTransaction) {
+			logger.Info("purchase transaction already exists, resuming dispatch")
+		} else {
+			logger.Error("failed to register transaction in payments", "error", err)
+			return nil, u.retryableCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "payment service unavailable", ""))
+		}
 	}
 
 	payload, err := json.Marshal(workflows.PurchasePayload{
@@ -157,7 +163,7 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 	})
 	if err != nil {
 		logger.Error("failed to marshal purchase payload", "error", err)
-		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusInternalServerError, "internal server error", ""))
+		return nil, u.retryableCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusInternalServerError, "internal server error", ""))
 	}
 
 	timeoutAt := time.Now().UTC().Add(u.sagaTimeout)
@@ -171,11 +177,15 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 		TimeoutAt:     &timeoutAt,
 	})
 	if err != nil {
-		logger.Error("failed to create saga", "error", err)
-		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusInternalServerError, "internal server error", ""))
+		if errors.Is(err, repository.ErrDuplicateTransaction) {
+			logger.Info("purchase saga already exists, resuming dispatch")
+		} else {
+			logger.Error("failed to create saga", "error", err)
+			return nil, u.retryableCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusInternalServerError, "internal server error", ""))
+		}
+	} else {
+		logger.Info("purchase saga created", "saga_id", sagaInstance.ID)
 	}
-
-	logger.Info("purchase saga created", "saga_id", sagaInstance.ID)
 
 	if err := activities.PublishWalletDebitRequested(ctx, u.publisher, transactionID, messaging.WalletDebitRequested{
 		TransactionID: transactionID,
@@ -185,7 +195,7 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 		SourceStep:    step,
 	}); err != nil {
 		logger.Error("failed to publish wallet.debit.requested", "error", err)
-		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "failed to dispatch purchase command", "INITIAL_DISPATCH_FAILED"))
+		return nil, u.retryableCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "failed to dispatch purchase command", "INITIAL_DISPATCH_FAILED"))
 	}
 
 	response := AcceptedResponse{
@@ -213,6 +223,13 @@ func (u *UseCase) finalizeCommandError(ctx context.Context, scope, key string, e
 		if finalizeErr := u.idempotency.Finalize(ctx, scope, key, err.HTTPStatus(), body); finalizeErr != nil {
 			logging.FromContext(ctx).Error("failed to finalize idempotency error response", "error", finalizeErr, "scope", scope, "key", key)
 		}
+	}
+	return err
+}
+
+func (u *UseCase) retryableCommandError(ctx context.Context, scope, key string, err *commanderror.Error) *commanderror.Error {
+	if markErr := u.idempotency.MarkRetryable(ctx, scope, key); markErr != nil {
+		logging.FromContext(ctx).Error("failed to mark idempotency key retryable", "error", markErr, "scope", scope, "key", key)
 	}
 	return err
 }

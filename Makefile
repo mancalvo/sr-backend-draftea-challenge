@@ -1,7 +1,7 @@
 .PHONY: build test test-platform test-messaging test-catalog-access test-payments test-wallets test-saga test-deposit-flow test-purchase-flow test-refund-flow test-observability test-integration vet fmt check clean \
        check-migrations migrate-up migrate-down migrate-create check-compose
 
-SERVICES       := api-gateway saga-orchestrator payments wallets catalog-access
+SERVICES       := saga-orchestrator payments wallets catalog-access
 BIN_DIR        := bin
 MIGRATION_DIRS := db/migrations/payments db/migrations/wallets db/migrations/catalogaccess db/migrations/saga
 DATABASE_URL   ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)?sslmode=disable

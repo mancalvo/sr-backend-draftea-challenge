@@ -72,8 +72,7 @@ func main() {
 
 	// Provider (mock implementation for local development)
 	providerTimeout := config.GetEnvDuration("PROVIDER_CHARGE_TIMEOUT", 30*time.Second)
-	provider := paymentsprovider.NewMockProvider(100 * time.Millisecond)
-	_ = providerTimeout // used by orchestrator for saga timeout, not directly by provider
+	provider := paymentsprovider.NewMockProvider(providerTimeout)
 
 	// Handlers
 	httpHandler := paymentsapi.NewHandler(paymentsservice.New(repo), logger)

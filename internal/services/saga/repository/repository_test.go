@@ -139,6 +139,29 @@ func TestMemoryRepository_UpdateSagaStatus_LegalTransition(t *testing.T) {
 	}
 }
 
+func TestMemoryRepository_UpdateSagaStep(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	saga, _ := repo.CreateSaga(ctx, &SagaInstance{
+		TransactionID: "txn-1",
+		Type:          SagaTypeDeposit,
+		Status:        StatusRunning,
+	})
+
+	step := "deposit_credit"
+	updated, err := repo.UpdateSagaStep(ctx, saga.ID, &step)
+	if err != nil {
+		t.Fatalf("update saga step: %v", err)
+	}
+	if updated.Status != StatusRunning {
+		t.Fatalf("status = %s, want running", updated.Status)
+	}
+	if updated.CurrentStep == nil || *updated.CurrentStep != step {
+		t.Fatalf("current_step = %v, want %s", updated.CurrentStep, step)
+	}
+}
+
 func TestMemoryRepository_UpdateSagaStatus_IllegalTransition(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()
@@ -246,28 +269,42 @@ func TestMemoryRepository_ListTimedOutSagas(t *testing.T) {
 	}
 }
 
-func TestMemoryRepository_IdempotencyKey_SaveAndGet(t *testing.T) {
+func TestMemoryRepository_IdempotencyKey_ReserveAndFinalize(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()
 
 	ik := &IdempotencyKey{
-		Key:            "test-key",
-		Scope:          "deposit",
-		RequestHash:    "abc123",
-		TransactionID:  "txn-1",
-		State:          IdempotencyStateCompleted,
-		ResponseStatus: 202,
-		ResponseBody:   json.RawMessage(`{"success":true}`),
-		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
+		Key:           "test-key",
+		Scope:         "deposit",
+		RequestHash:   "abc123",
+		TransactionID: "txn-1",
 	}
 
-	if err := repo.SaveIdempotencyKey(ctx, ik); err != nil {
-		t.Fatalf("save key: %v", err)
-	}
-
-	got, err := repo.GetIdempotencyKey(ctx, "deposit", "test-key")
+	reserved, claimed, err := repo.ReserveIdempotencyKey(ctx, ik, 30*time.Second)
 	if err != nil {
-		t.Fatalf("get key: %v", err)
+		t.Fatalf("reserve key: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected reservation to be claimed")
+	}
+	if reserved.TransactionID != "txn-1" {
+		t.Fatalf("transaction_id = %s, want txn-1", reserved.TransactionID)
+	}
+	if reserved.State != IdempotencyStateProcessing {
+		t.Fatalf("state = %s, want processing", reserved.State)
+	}
+
+	body := json.RawMessage(`{"success":true}`)
+	if err := repo.FinalizeIdempotencyKey(ctx, "deposit", "test-key", 202, body, 24*time.Hour); err != nil {
+		t.Fatalf("finalize key: %v", err)
+	}
+
+	got, claimed, err := repo.ReserveIdempotencyKey(ctx, ik, 30*time.Second)
+	if err != nil {
+		t.Fatalf("reserve completed key: %v", err)
+	}
+	if claimed {
+		t.Fatal("expected completed key to replay instead of being claimed")
 	}
 	if got.TransactionID != "txn-1" {
 		t.Errorf("transaction_id = %s, want txn-1", got.TransactionID)
@@ -284,149 +321,121 @@ func TestMemoryRepository_IdempotencyKey_SaveAndGet(t *testing.T) {
 	if got.RequestHash != "abc123" {
 		t.Errorf("request_hash = %s, want abc123", got.RequestHash)
 	}
-}
-
-func TestMemoryRepository_IdempotencyKey_Finalize(t *testing.T) {
-	repo := NewMemoryRepository()
-	ctx := context.Background()
-
-	ik := &IdempotencyKey{
-		Key:           "processing-key",
-		Scope:         "deposit",
-		RequestHash:   "hash-processing",
-		TransactionID: "txn-1",
-		State:         IdempotencyStateProcessing,
-		ExpiresAt:     time.Now().UTC().Add(24 * time.Hour),
-	}
-
-	if err := repo.SaveIdempotencyKey(ctx, ik); err != nil {
-		t.Fatalf("save key: %v", err)
-	}
-
-	body := json.RawMessage(`{"success":true,"data":{"transaction_id":"txn-1","status":"pending"}}`)
-	if err := repo.FinalizeIdempotencyKey(ctx, "deposit", "processing-key", 202, body); err != nil {
-		t.Fatalf("finalize key: %v", err)
-	}
-
-	got, err := repo.GetIdempotencyKey(ctx, "deposit", "processing-key")
-	if err != nil {
-		t.Fatalf("get finalized key: %v", err)
-	}
-	if got.State != IdempotencyStateCompleted {
-		t.Errorf("state = %s, want completed", got.State)
-	}
-	if got.ResponseStatus != 202 {
-		t.Errorf("response_status = %d, want 202", got.ResponseStatus)
-	}
 	if string(got.ResponseBody) != string(body) {
 		t.Errorf("response_body = %s, want %s", got.ResponseBody, body)
 	}
 }
 
-func TestMemoryRepository_IdempotencyKey_Duplicate(t *testing.T) {
+func TestMemoryRepository_IdempotencyKey_ActiveProcessingBlocksSecondClaim(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()
 
 	ik := &IdempotencyKey{
-		Key:            "dup-key",
-		Scope:          "deposit",
-		RequestHash:    "hash1",
-		TransactionID:  "txn-1",
-		State:          IdempotencyStateCompleted,
-		ResponseStatus: 202,
-		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
+		Key:           "dup-key",
+		Scope:         "deposit",
+		RequestHash:   "hash1",
+		TransactionID: "txn-1",
 	}
 
-	repo.SaveIdempotencyKey(ctx, ik)
-	err := repo.SaveIdempotencyKey(ctx, ik)
-	if err != ErrIdempotencyKeyExists {
-		t.Fatalf("expected ErrIdempotencyKeyExists, got %v", err)
-	}
-}
-
-func TestMemoryRepository_IdempotencyKey_Expired(t *testing.T) {
-	repo := NewMemoryRepository()
-	ctx := context.Background()
-
-	ik := &IdempotencyKey{
-		Key:            "expired-key",
-		Scope:          "deposit",
-		RequestHash:    "hash1",
-		TransactionID:  "txn-1",
-		State:          IdempotencyStateCompleted,
-		ResponseStatus: 202,
-		ExpiresAt:      time.Now().UTC().Add(-1 * time.Hour), // already expired
-	}
-
-	repo.SaveIdempotencyKey(ctx, ik)
-
-	_, err := repo.GetIdempotencyKey(ctx, "deposit", "expired-key")
-	if err != ErrNotFound {
-		t.Fatalf("expected ErrNotFound for expired key, got %v", err)
-	}
-}
-
-func TestMemoryRepository_IdempotencyKey_NotFound(t *testing.T) {
-	repo := NewMemoryRepository()
-	_, err := repo.GetIdempotencyKey(context.Background(), "deposit", "nonexistent")
-	if err != ErrNotFound {
-		t.Fatalf("expected ErrNotFound, got %v", err)
-	}
-}
-
-func TestMemoryRepository_IdempotencyKey_ScopeIsolation(t *testing.T) {
-	repo := NewMemoryRepository()
-	ctx := context.Background()
-
-	// Save a key under "deposit" scope.
-	ik1 := &IdempotencyKey{
-		Key:            "shared-key",
-		Scope:          "deposit",
-		RequestHash:    "hash-deposit",
-		TransactionID:  "txn-1",
-		State:          IdempotencyStateCompleted,
-		ResponseStatus: 202,
-		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
-	}
-	if err := repo.SaveIdempotencyKey(ctx, ik1); err != nil {
-		t.Fatalf("save deposit key: %v", err)
-	}
-
-	// Save the same key under "purchase" scope -> should succeed (different scope).
-	ik2 := &IdempotencyKey{
-		Key:            "shared-key",
-		Scope:          "purchase",
-		RequestHash:    "hash-purchase",
-		TransactionID:  "txn-2",
-		State:          IdempotencyStateCompleted,
-		ResponseStatus: 202,
-		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
-	}
-	if err := repo.SaveIdempotencyKey(ctx, ik2); err != nil {
-		t.Fatalf("save purchase key: %v", err)
-	}
-
-	// Lookup by deposit scope.
-	got, err := repo.GetIdempotencyKey(ctx, "deposit", "shared-key")
+	_, claimed, err := repo.ReserveIdempotencyKey(ctx, ik, time.Minute)
 	if err != nil {
-		t.Fatalf("get deposit key: %v", err)
+		t.Fatalf("first reserve: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected first reserve to claim key")
+	}
+
+	got, claimed, err := repo.ReserveIdempotencyKey(ctx, ik, time.Minute)
+	if err != nil {
+		t.Fatalf("second reserve: %v", err)
+	}
+	if claimed {
+		t.Fatal("expected second reserve to observe active processing key")
+	}
+	if got.State != IdempotencyStateProcessing {
+		t.Fatalf("state = %s, want processing", got.State)
+	}
+}
+
+func TestMemoryRepository_IdempotencyKey_ExpiredProcessingReusesTransactionID(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	first := &IdempotencyKey{
+		Key:           "expired-key",
+		Scope:         "deposit",
+		RequestHash:   "hash1",
+		TransactionID: "txn-1",
+	}
+
+	_, claimed, err := repo.ReserveIdempotencyKey(ctx, first, time.Minute)
+	if err != nil {
+		t.Fatalf("initial reserve: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected initial reserve to claim key")
+	}
+	if err := repo.MarkIdempotencyKeyRetryable(ctx, "deposit", "expired-key"); err != nil {
+		t.Fatalf("mark retryable: %v", err)
+	}
+
+	second := &IdempotencyKey{
+		Key:           "expired-key",
+		Scope:         "deposit",
+		RequestHash:   "hash1",
+		TransactionID: "txn-2",
+	}
+	got, claimed, err := repo.ReserveIdempotencyKey(ctx, second, time.Minute)
+	if err != nil {
+		t.Fatalf("reclaim reserve: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected expired processing key to be reclaimable")
 	}
 	if got.TransactionID != "txn-1" {
-		t.Errorf("deposit: transaction_id = %s, want txn-1", got.TransactionID)
+		t.Fatalf("transaction_id = %s, want original txn-1", got.TransactionID)
 	}
+}
 
-	// Lookup by purchase scope.
-	got, err = repo.GetIdempotencyKey(ctx, "purchase", "shared-key")
+func TestMemoryRepository_IdempotencyKey_ExpiredCompletedCanBeReclaimed(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	original := &IdempotencyKey{
+		Key:           "shared-key",
+		Scope:         "deposit",
+		RequestHash:   "hash-deposit",
+		TransactionID: "txn-1",
+	}
+	_, claimed, err := repo.ReserveIdempotencyKey(ctx, original, time.Minute)
 	if err != nil {
-		t.Fatalf("get purchase key: %v", err)
+		t.Fatalf("reserve original key: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected original key to be claimed")
+	}
+	if err := repo.FinalizeIdempotencyKey(ctx, "deposit", "shared-key", 202, json.RawMessage(`{"success":true}`), time.Nanosecond); err != nil {
+		t.Fatalf("finalize original key: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+
+	reclaimed := &IdempotencyKey{
+		Key:           "shared-key",
+		Scope:         "deposit",
+		RequestHash:   "hash-new",
+		TransactionID: "txn-2",
+	}
+	got, claimed, err := repo.ReserveIdempotencyKey(ctx, reclaimed, time.Minute)
+	if err != nil {
+		t.Fatalf("reclaim completed key: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected expired completed key to be reclaimable")
 	}
 	if got.TransactionID != "txn-2" {
-		t.Errorf("purchase: transaction_id = %s, want txn-2", got.TransactionID)
+		t.Fatalf("transaction_id = %s, want txn-2", got.TransactionID)
 	}
-
-	// Lookup by a scope that was never used -> not found.
-	_, err = repo.GetIdempotencyKey(ctx, "refund", "shared-key")
-	if err != ErrNotFound {
-		t.Fatalf("refund scope: expected ErrNotFound, got %v", err)
+	if got.RequestHash != "hash-new" {
+		t.Fatalf("request_hash = %s, want hash-new", got.RequestHash)
 	}
 }

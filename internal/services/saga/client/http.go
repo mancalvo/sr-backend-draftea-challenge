@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,9 @@ import (
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 )
+
+// ErrDuplicateTransaction indicates the requested transaction already exists.
+var ErrDuplicateTransaction = errors.New("transaction already exists")
 
 // CatalogClient makes synchronous HTTP calls to the catalog-access service
 // for purchase and refund prechecks.
@@ -205,6 +209,9 @@ func (c *HTTPPaymentsClient) RegisterTransaction(ctx context.Context, req Regist
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
+		if resp.StatusCode == http.StatusConflict {
+			return nil, ErrDuplicateTransaction
+		}
 		respBody, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("register transaction returned status %d: %s", resp.StatusCode, string(respBody))
 	}

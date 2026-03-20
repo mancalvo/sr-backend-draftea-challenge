@@ -1,6 +1,6 @@
 # Multi-stage Dockerfile for all Go services.
 # Build with: docker build --build-arg SERVICE=<name> -t <name> .
-# where <name> is one of: api-gateway, saga-orchestrator, payments, wallets, catalog-access
+# where <name> is one of: saga-orchestrator, payments, wallets, catalog-access
 
 # ---- build stage ----
 FROM golang:1.25-alpine AS builder

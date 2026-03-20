@@ -19,6 +19,7 @@ import (
 type Repository interface {
 	GetSagaByTransactionID(ctx context.Context, transactionID string) (*domain.SagaInstance, error)
 	UpdateSagaStatus(ctx context.Context, id string, status domain.SagaStatus, outcome *domain.SagaOutcome, currentStep *string) (*domain.SagaInstance, error)
+	UpdateSagaStep(ctx context.Context, id string, currentStep *string) (*domain.SagaInstance, error)
 }
 
 // PaymentsClient defines the payments operations needed to process outcomes.
@@ -153,6 +154,13 @@ func isSagaTerminal(s *domain.SagaInstance) bool {
 	return false
 }
 
+func (u *UseCase) updateSagaStep(ctx context.Context, sagaID string, step string) error {
+	if _, err := u.repo.UpdateSagaStep(ctx, sagaID, &step); err != nil {
+		return fmt.Errorf("update saga step to %s: %w", step, err)
+	}
+	return nil
+}
+
 func (u *UseCase) publishAccessGrant(ctx context.Context, env messaging.Envelope, s *domain.SagaInstance, logger *slog.Logger) error {
 	var payload messaging.WalletDebited
 	if err := env.DecodePayload(&payload); err != nil {
@@ -163,6 +171,10 @@ func (u *UseCase) publishAccessGrant(ctx context.Context, env messaging.Envelope
 
 	if isSagaTerminal(s) || s.Status == domain.StatusCompensating {
 		logger.Info("saga already past debit step, ignoring duplicate wallet.debited")
+		return nil
+	}
+	if s.CurrentStep != nil && *s.CurrentStep != workflows.PurchaseDebitStep {
+		logger.Info("wallet.debited does not match current purchase step, ignoring duplicate")
 		return nil
 	}
 
@@ -177,6 +189,9 @@ func (u *UseCase) publishAccessGrant(ctx context.Context, env messaging.Envelope
 		OfferingID:    purchasePayload.OfferingID,
 	}); err != nil {
 		return fmt.Errorf("publish access.grant.requested: %w", err)
+	}
+	if err := u.updateSagaStep(ctx, s.ID, workflows.PurchaseGrantStep); err != nil {
+		return err
 	}
 
 	logger.Info("published access.grant.requested")
@@ -411,6 +426,10 @@ func (u *UseCase) publishRefundCredit(ctx context.Context, env messaging.Envelop
 		logger.Info("saga already terminal, ignoring duplicate access.revoked")
 		return nil
 	}
+	if s.CurrentStep != nil && *s.CurrentStep != workflows.RefundRevokeAccessStep {
+		logger.Info("access.revoked does not match current refund step, ignoring duplicate")
+		return nil
+	}
 
 	refundPayload, err := decodeRefundPayload(s)
 	if err != nil {
@@ -425,6 +444,9 @@ func (u *UseCase) publishRefundCredit(ctx context.Context, env messaging.Envelop
 		SourceStep:    workflows.RefundCreditStep,
 	}); err != nil {
 		return fmt.Errorf("publish wallet.credit.requested for refund: %w", err)
+	}
+	if err := u.updateSagaStep(ctx, s.ID, workflows.RefundCreditStep); err != nil {
+		return err
 	}
 
 	logger.Info("published wallet.credit.requested for refund")
@@ -477,6 +499,10 @@ func (u *UseCase) recordProviderSuccess(ctx context.Context, env messaging.Envel
 		logger.Info("saga already terminal, ignoring duplicate provider.charge.succeeded")
 		return nil
 	}
+	if s.CurrentStep != nil && *s.CurrentStep != workflows.DepositChargeStep {
+		logger.Info("provider.charge.succeeded does not match current deposit step, ignoring duplicate")
+		return nil
+	}
 
 	depositPayload, err := decodeDepositPayload(s)
 	if err != nil {
@@ -505,6 +531,9 @@ func (u *UseCase) recordProviderSuccess(ctx context.Context, env messaging.Envel
 		SourceStep:    step,
 	}); err != nil {
 		return fmt.Errorf("publish wallet.credit.requested for deposit: %w", err)
+	}
+	if err := u.updateSagaStep(ctx, s.ID, step); err != nil {
+		return err
 	}
 
 	logger.Info("published wallet.credit.requested for deposit")
