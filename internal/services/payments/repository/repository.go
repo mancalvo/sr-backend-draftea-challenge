@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	platformdatabase "github.com/draftea/sr-backend-draftea-challenge/internal/platform/database"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/domain"
 )
 
@@ -62,7 +63,7 @@ func (r *PostgresRepository) CreateTransaction(ctx context.Context, txn *domain.
 	)
 	result, err := scanTransaction(row)
 	if err != nil {
-		if isDuplicateKeyError(err) {
+		if platformdatabase.IsUniqueViolation(err) {
 			return nil, ErrDuplicateID
 		}
 		return nil, fmt.Errorf("create transaction: %w", err)
@@ -340,24 +341,6 @@ func scanTransaction(row *sql.Row) (*domain.Transaction, error) {
 		t.StatusReason = &statusReason.String
 	}
 	return &t, nil
-}
-
-// isDuplicateKeyError checks if the error is a PostgreSQL unique_violation (23505).
-func isDuplicateKeyError(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return containsStr(s, "23505") || containsStr(s, "unique_violation") || containsStr(s, "duplicate key")
-}
-
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // ---- In-memory repository for testing ----

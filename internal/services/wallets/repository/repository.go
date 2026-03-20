@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	platformdatabase "github.com/draftea/sr-backend-draftea-challenge/internal/platform/database"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/domain"
 )
 
@@ -129,7 +130,7 @@ func (r *PostgresRepository) Debit(ctx context.Context, userID, transactionID, s
 		&mv.Type, &mv.Amount, &mv.BalanceBefore, &mv.BalanceAfter, &mv.CreatedAt,
 	)
 	if err != nil {
-		if isDuplicateKeyError(err) {
+		if platformdatabase.IsUniqueViolation(err) {
 			return nil, ErrDuplicateMovement
 		}
 		return nil, fmt.Errorf("insert movement: %w", err)
@@ -193,7 +194,7 @@ func (r *PostgresRepository) Credit(ctx context.Context, userID, transactionID, 
 		&mv.Type, &mv.Amount, &mv.BalanceBefore, &mv.BalanceAfter, &mv.CreatedAt,
 	)
 	if err != nil {
-		if isDuplicateKeyError(err) {
+		if platformdatabase.IsUniqueViolation(err) {
 			return nil, ErrDuplicateMovement
 		}
 		return nil, fmt.Errorf("insert movement: %w", err)
@@ -239,23 +240,6 @@ func (r *PostgresRepository) getWalletInTx(ctx context.Context, tx *sql.Tx, user
 		return nil, fmt.Errorf("get wallet in tx: %w", err)
 	}
 	return &w, nil
-}
-
-func isDuplicateKeyError(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return containsStr(s, "23505") || containsStr(s, "unique_violation") || containsStr(s, "duplicate key")
-}
-
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // MemoryRepository is an in-memory implementation of Repository for unit tests.

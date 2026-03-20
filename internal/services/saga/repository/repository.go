@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
+	platformdatabase "github.com/draftea/sr-backend-draftea-challenge/internal/platform/database"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
 )
 
@@ -81,7 +81,7 @@ func (r *PostgresRepository) CreateSaga(ctx context.Context, saga *domain.SagaIn
 	)
 	result, err := scanSaga(row)
 	if err != nil {
-		if isDuplicateKeyError(err) {
+		if platformdatabase.IsUniqueViolation(err) {
 			return nil, ErrDuplicateTransaction
 		}
 		return nil, fmt.Errorf("create saga: %w", err)
@@ -205,7 +205,7 @@ func (r *PostgresRepository) SaveIdempotencyKey(ctx context.Context, key *domain
 		key.TransactionID, key.ResponseStatus, key.ResponseBody, key.ExpiresAt,
 	)
 	if err != nil {
-		if isDuplicateKeyError(err) {
+		if platformdatabase.IsUniqueViolation(err) {
 			return ErrIdempotencyKeyExists
 		}
 		return fmt.Errorf("save idempotency key: %w", err)
@@ -263,14 +263,6 @@ func scanSaga(row *sql.Row) (*domain.SagaInstance, error) {
 		s.TimeoutAt = &timeoutAt.Time
 	}
 	return &s, nil
-}
-
-func isDuplicateKeyError(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return strings.Contains(s, "23505") || strings.Contains(s, "unique_violation") || strings.Contains(s, "duplicate key")
 }
 
 // ---- In-memory repository for testing ----

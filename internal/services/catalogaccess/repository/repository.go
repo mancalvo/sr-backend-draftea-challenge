@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	platformdatabase "github.com/draftea/sr-backend-draftea-challenge/internal/platform/database"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/domain"
 )
 
@@ -149,7 +150,7 @@ func (r *PostgresRepository) GrantAccess(ctx context.Context, userID, offeringID
 	ar, err := r.scanAccessRecord(row)
 	if err != nil {
 		// Check for unique constraint violation on the partial unique index.
-		if isUniqueViolation(err) {
+		if platformdatabase.IsUniqueViolation(err) {
 			return nil, ErrDuplicateAccess
 		}
 		return nil, fmt.Errorf("grant access: %w", err)
@@ -192,29 +193,6 @@ func (r *PostgresRepository) scanAccessRecord(row *sql.Row) (*domain.AccessRecor
 		a.RevokedAt = &t
 	}
 	return &a, nil
-}
-
-// isUniqueViolation checks if the error is a PostgreSQL unique_violation (23505).
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	// lib/pq exposes the SQLSTATE code; check the error string as a fallback.
-	return contains(err.Error(), "23505") || contains(err.Error(), "unique_violation") ||
-		contains(err.Error(), "duplicate key")
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // ---- In-memory repository for testing ----
