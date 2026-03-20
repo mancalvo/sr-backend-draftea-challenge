@@ -334,8 +334,9 @@ func TestHandleDeposit_IdempotentAcceptance(t *testing.T) {
 		t.Fatalf("first: status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
+	firstBody := rec.Body.String()
 	var firstResp httpx.Response
-	json.NewDecoder(rec.Body).Decode(&firstResp)
+	json.NewDecoder(bytes.NewReader([]byte(firstBody))).Decode(&firstResp)
 	firstData := firstResp.Data.(map[string]any)
 	firstTxnID := firstData["transaction_id"].(string)
 
@@ -355,14 +356,18 @@ func TestHandleDeposit_IdempotentAcceptance(t *testing.T) {
 		t.Fatalf("second: status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
+	secondBody := rec.Body.String()
 	var secondResp httpx.Response
-	json.NewDecoder(rec.Body).Decode(&secondResp)
+	json.NewDecoder(bytes.NewReader([]byte(secondBody))).Decode(&secondResp)
 	secondData := secondResp.Data.(map[string]any)
 	secondTxnID := secondData["transaction_id"].(string)
 
 	// Both responses must return the same transaction_id.
 	if firstTxnID != secondTxnID {
 		t.Errorf("idempotent responses differ: first=%s, second=%s", firstTxnID, secondTxnID)
+	}
+	if firstBody != secondBody {
+		t.Errorf("idempotent raw responses differ: first=%s, second=%s", firstBody, secondBody)
 	}
 }
 

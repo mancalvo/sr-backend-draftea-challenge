@@ -68,7 +68,7 @@ func (h *Handler) GetEntitlements(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) PurchasePrecheck(w http.ResponseWriter, r *http.Request) {
 	var req PurchasePrecheckRequest
 	if err := httpx.Decode(r, &req); err != nil {
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.WriteDecodeError(w, err)
 		return
 	}
 
@@ -98,7 +98,7 @@ func (h *Handler) PurchasePrecheck(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) RefundPrecheck(w http.ResponseWriter, r *http.Request) {
 	var req RefundPrecheckRequest
 	if err := httpx.Decode(r, &req); err != nil {
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.WriteDecodeError(w, err)
 		return
 	}
 

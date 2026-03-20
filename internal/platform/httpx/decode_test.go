@@ -56,3 +56,61 @@ func TestDecode_UnknownFields(t *testing.T) {
 		t.Error("Decode should return error for unknown fields")
 	}
 }
+
+func TestDecode_RejectsUnsupportedContentType(t *testing.T) {
+	body := `{"name":"test"}`
+	r, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	r.Header.Set("Content-Type", "text/plain")
+
+	var dst struct {
+		Name string `json:"name"`
+	}
+	err := Decode(r, &dst)
+	if err == nil {
+		t.Fatal("Decode should return error for unsupported content type")
+	}
+
+	var requestErr *RequestError
+	if !AsRequestError(err, &requestErr) {
+		t.Fatalf("expected RequestError, got %T", err)
+	}
+	if requestErr.StatusCode() != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want %d", requestErr.StatusCode(), http.StatusUnsupportedMediaType)
+	}
+}
+
+func TestDecode_RejectsMultipleJSONValues(t *testing.T) {
+	body := `{"name":"test"}{"name":"extra"}`
+	r, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+
+	var dst struct {
+		Name string `json:"name"`
+	}
+	if err := Decode(r, &dst); err == nil {
+		t.Fatal("Decode should return error for multiple JSON values")
+	}
+}
+
+func TestDecode_RequestBodyTooLarge(t *testing.T) {
+	body := `{"name":"` + strings.Repeat("a", maxDecodeBodyBytes) + `"}`
+	r, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+
+	var dst struct {
+		Name string `json:"name"`
+	}
+
+	err := Decode(r, &dst)
+	if err == nil {
+		t.Fatal("Decode should return error for oversized request body")
+	}
+
+	var requestErr *RequestError
+	if !AsRequestError(err, &requestErr) {
+		t.Fatalf("expected RequestError, got %T", err)
+	}
+	if requestErr.StatusCode() != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", requestErr.StatusCode(), http.StatusRequestEntityTooLarge)
+	}
+}

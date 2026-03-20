@@ -4,6 +4,8 @@ package httpx
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 )
 
@@ -29,52 +31,103 @@ type FieldError struct {
 
 // JSON writes a JSON response with the given status code.
 func JSON(w http.ResponseWriter, status int, data any) {
-	resp := Response{
-		Success: status >= 200 && status < 300,
-		Data:    data,
+	body, err := MarshalResponse(status, data)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "internal server error")
+		return
 	}
-	writeJSON(w, status, resp)
+	WriteJSONBytes(w, status, body)
 }
 
 // Error writes a JSON error response with the given status code.
 func Error(w http.ResponseWriter, status int, message string) {
-	resp := Response{
+	body, err := marshalEnvelope(Response{
 		Success: false,
 		Error: &ErrorBody{
 			Message: message,
 		},
+	})
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
 	}
-	writeJSON(w, status, resp)
+	WriteJSONBytes(w, status, body)
 }
 
 // ErrorWithCode writes a JSON error response with an explicit error code.
 func ErrorWithCode(w http.ResponseWriter, status int, message, code string) {
-	resp := Response{
+	body, err := marshalEnvelope(Response{
 		Success: false,
 		Error: &ErrorBody{
 			Message: message,
 			Code:    code,
 		},
+	})
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
 	}
-	writeJSON(w, status, resp)
+	WriteJSONBytes(w, status, body)
 }
 
 // ValidationError writes a 422 Unprocessable Entity response with field-level
 // validation details. The fields slice must contain at least one entry.
 func ValidationError(w http.ResponseWriter, fields []FieldError) {
-	resp := Response{
+	body, err := marshalEnvelope(Response{
 		Success: false,
 		Error: &ErrorBody{
 			Message: "Request validation failed",
 			Code:    "VALIDATION_ERROR",
 			Fields:  fields,
 		},
+	})
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
 	}
-	writeJSON(w, http.StatusUnprocessableEntity, resp)
+	WriteJSONBytes(w, http.StatusUnprocessableEntity, body)
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
+// WriteDecodeError writes a request-decode failure with its associated status.
+func WriteDecodeError(w http.ResponseWriter, err error) {
+	var requestErr *RequestError
+	if err == nil {
+		return
+	}
+	if !AsRequestError(err, &requestErr) {
+		Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	Error(w, requestErr.StatusCode(), requestErr.Error())
+}
+
+// MarshalResponse marshals the standard success envelope for the given status.
+func MarshalResponse(status int, data any) ([]byte, error) {
+	return marshalEnvelope(Response{
+		Success: status >= 200 && status < 300,
+		Data:    data,
+	})
+}
+
+// WriteJSONBytes writes a pre-marshaled JSON response body using the standard content type.
+func WriteJSONBytes(w http.ResponseWriter, status int, body []byte) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	if len(body) == 0 {
+		return
+	}
+	_, _ = w.Write(body)
+}
+
+// AsRequestError unwraps err into a RequestError when present.
+func AsRequestError(err error, target **RequestError) bool {
+	return errors.As(err, target)
+}
+
+func marshalEnvelope(resp Response) ([]byte, error) {
+	body, err := json.Marshal(resp)
+	if err != nil {
+		return nil, fmt.Errorf("marshal response: %w", err)
+	}
+	return body, nil
 }

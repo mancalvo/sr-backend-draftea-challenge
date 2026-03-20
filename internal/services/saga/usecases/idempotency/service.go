@@ -57,10 +57,7 @@ func (s *Service) Check(ctx context.Context, scope, key, requestHash string) (*R
 
 // SaveAccepted persists the accepted response so retries replay the same result.
 func (s *Service) SaveAccepted(ctx context.Context, scope, key, requestHash, transactionID string, status int, response any) error {
-	respBody, err := json.Marshal(httpx.Response{
-		Success: true,
-		Data:    response,
-	})
+	respBody, err := httpx.MarshalResponse(status, response)
 	if err != nil {
 		return fmt.Errorf("marshal idempotency response: %w", err)
 	}

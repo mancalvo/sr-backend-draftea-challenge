@@ -32,7 +32,7 @@ func NewHandler(service *service.Service, logger *slog.Logger) *Handler {
 func (h *Handler) CreateTransaction(w http.ResponseWriter, r *http.Request) {
 	var req CreateTransactionRequest
 	if err := httpx.Decode(r, &req); err != nil {
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.WriteDecodeError(w, err)
 		return
 	}
 
@@ -95,7 +95,7 @@ func (h *Handler) UpdateTransactionStatus(w http.ResponseWriter, r *http.Request
 
 	var req UpdateStatusRequest
 	if err := httpx.Decode(r, &req); err != nil {
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.WriteDecodeError(w, err)
 		return
 	}
 

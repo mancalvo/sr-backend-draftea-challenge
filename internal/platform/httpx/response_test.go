@@ -1,7 +1,9 @@
 package httpx
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -157,5 +159,45 @@ func TestError_InternalServerError(t *testing.T) {
 	}
 	if resp.Success {
 		t.Error("success = true, want false for 500")
+	}
+}
+
+func TestMarshalResponse_MatchesJSONWriter(t *testing.T) {
+	body, err := MarshalResponse(http.StatusAccepted, map[string]string{"status": "accepted"})
+	if err != nil {
+		t.Fatalf("MarshalResponse: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	JSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+
+	if !bytes.Equal(body, w.Body.Bytes()) {
+		t.Fatalf("marshal body = %s, want %s", string(body), w.Body.String())
+	}
+}
+
+func TestWriteDecodeError_UsesRequestErrorStatus(t *testing.T) {
+	w := httptest.NewRecorder()
+
+	WriteDecodeError(w, &RequestError{
+		status:  http.StatusUnsupportedMediaType,
+		message: "Content-Type must be application/json",
+	})
+
+	if w.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnsupportedMediaType)
+	}
+}
+
+func TestAsRequestError_UnwrapsWrappedError(t *testing.T) {
+	err := errors.New("outer")
+	err = errors.Join(err, &RequestError{status: http.StatusBadRequest, message: "bad request"})
+
+	var requestErr *RequestError
+	if !AsRequestError(err, &requestErr) {
+		t.Fatal("expected wrapped RequestError")
+	}
+	if requestErr.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", requestErr.StatusCode(), http.StatusBadRequest)
 	}
 }

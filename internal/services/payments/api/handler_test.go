@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,6 +122,21 @@ func TestCreateTransaction_WithOfferingID(t *testing.T) {
 	data := resp.Data.(map[string]any)
 	if data["offering_id"] != "offering-1" {
 		t.Errorf("offering_id = %v, want offering-1", data["offering_id"])
+	}
+}
+
+func TestCreateTransaction_UnsupportedContentType(t *testing.T) {
+	repo := NewMemoryRepository()
+	h := NewHandler(paymentsservice.New(repo), testLogger())
+	router := newTestRouter(h)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/transactions", strings.NewReader(`{"id":"txn-1"}`))
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusUnsupportedMediaType, rec.Body.String())
 	}
 }
 

@@ -67,7 +67,7 @@ func NewHandler(
 func (h *Handler) HandleDeposit(w http.ResponseWriter, r *http.Request) {
 	var cmd DepositCommand
 	if err := httpx.Decode(r, &cmd); err != nil {
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.WriteDecodeError(w, err)
 		return
 	}
 
@@ -107,7 +107,7 @@ func (h *Handler) HandleDeposit(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 	var cmd PurchaseCommand
 	if err := httpx.Decode(r, &cmd); err != nil {
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.WriteDecodeError(w, err)
 		return
 	}
 
@@ -143,7 +143,7 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 	var cmd RefundCommand
 	if err := httpx.Decode(r, &cmd); err != nil {
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.WriteDecodeError(w, err)
 		return
 	}
 
@@ -196,11 +196,7 @@ func writeCommandError(w http.ResponseWriter, err error) bool {
 }
 
 func writeCachedResponse(w http.ResponseWriter, replay *idempotency.Replay) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(replay.StatusCode)
-	if replay.Body != nil {
-		_, _ = w.Write(replay.Body)
-	}
+	httpx.WriteJSONBytes(w, replay.StatusCode, replay.Body)
 }
 
 // validateDepositCommand returns field-level validation errors for a deposit command.
