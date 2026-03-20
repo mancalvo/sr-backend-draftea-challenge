@@ -20,7 +20,12 @@ import (
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/rabbitmq"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments"
+	paymentsapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/api"
+	paymentsconsumer "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/consumer"
+	paymentsprovider "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/provider"
+	paymentsrepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/repository"
+	paymentsservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/service"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/usecases/processdeposit"
 )
 
 func main() {
@@ -49,7 +54,7 @@ func main() {
 	}
 
 	// Repository
-	repo := payments.NewPostgresRepository(db)
+	repo := paymentsrepository.NewPostgresRepository(db)
 
 	// RabbitMQ connection (with retry for Docker Compose startup ordering)
 	rmqCfg := config.LoadRabbitMQ()
@@ -90,15 +95,15 @@ func main() {
 
 	// Provider (mock implementation for local development)
 	providerTimeout := config.GetEnvDuration("PROVIDER_CHARGE_TIMEOUT", 30*time.Second)
-	provider := payments.NewMockProvider(100 * time.Millisecond)
+	provider := paymentsprovider.NewMockProvider(100 * time.Millisecond)
 	_ = providerTimeout // used by orchestrator for saga timeout, not directly by provider
 
 	// Handlers
-	httpHandler := payments.NewHandler(repo, logger)
-	amqpHandler := payments.NewConsumerHandler(provider, publisher, logger)
+	httpHandler := paymentsapi.NewHandler(paymentsservice.New(repo), logger)
+	amqpHandler := paymentsconsumer.NewHandler(processdeposit.New(provider, publisher, logger))
 
 	// HTTP server with readiness checks
-	router := payments.NewRouter(httpHandler, logger,
+	router := paymentsapi.NewRouter(httpHandler, logger,
 		&health.DBPinger{Pinger: db},
 		&health.RabbitMQChecker{Conn: rmqConn},
 	)

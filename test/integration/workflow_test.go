@@ -27,15 +27,22 @@ import (
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments"
+	catalogconsumer "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/consumer"
+	catalogdomain "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/domain"
+	catalogrepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/repository"
+	catalogservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/service"
+	paymentsconsumer "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/consumer"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/usecases/processdeposit"
 	sagaapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/api"
 	sagaclient "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
 	sagaconsumer "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/consumer"
 	sagadomain "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
 	sagarepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
 	timeoutusecase "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/timeout"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets"
+	walletsconsumer "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/consumer"
+	walletsdomain "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/domain"
+	walletsrepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/repository"
+	walletsservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/service"
 )
 
 // ---------------------------------------------------------------------------
@@ -120,12 +127,12 @@ type testHarness struct {
 	sagaRouter   http.Handler
 
 	// Wallets
-	walletRepo     *wallets.MemoryRepository
-	walletConsumer *wallets.ConsumerHandler
+	walletRepo     *walletsrepository.MemoryRepository
+	walletConsumer *walletsconsumer.Handler
 
 	// Catalog-access
-	catalogRepo     *catalogaccess.MemoryRepository
-	catalogConsumer *catalogaccess.ConsumerHandler
+	catalogRepo     *catalogrepository.MemoryRepository
+	catalogConsumer *catalogconsumer.Handler
 
 	// Payments (provider)
 	paymentsProvider *configurableProvider
@@ -139,7 +146,7 @@ type configurableProvider struct {
 	reason  string
 }
 
-func (p *configurableProvider) Charge(ctx context.Context, transactionID, _ string, _ int64, _ string) (*payments.ChargeResult, error) {
+func (p *configurableProvider) Charge(ctx context.Context, transactionID, _ string, _ int64, _ string) (*processdeposit.ChargeResult, error) {
 	p.mu.Lock()
 	d := p.delay
 	success := p.success
@@ -155,12 +162,12 @@ func (p *configurableProvider) Charge(ctx context.Context, transactionID, _ stri
 	}
 
 	if success {
-		return &payments.ChargeResult{
+		return &processdeposit.ChargeResult{
 			Success:     true,
 			ProviderRef: "sim-" + transactionID,
 		}, nil
 	}
-	return &payments.ChargeResult{
+	return &processdeposit.ChargeResult{
 		Success: false,
 		Reason:  reason,
 	}, nil
@@ -220,24 +227,24 @@ func newHarness(t *testing.T) *testHarness {
 	b := newBus()
 
 	// -- Wallets --
-	walletRepo := wallets.NewMemoryRepository()
-	walletRepo.Wallets["user-1"] = &wallets.Wallet{
+	walletRepo := walletsrepository.NewMemoryRepository()
+	walletRepo.Wallets["user-1"] = &walletsdomain.Wallet{
 		ID:       "wallet-1",
 		UserID:   "user-1",
 		Balance:  20000,
 		Currency: "ARS",
 	}
-	walletConsumer := wallets.NewConsumerHandler(walletRepo, b, logger)
+	walletConsumer := walletsconsumer.NewHandler(walletsservice.New(walletRepo), b, logger)
 
 	// -- Catalog-access --
-	catalogRepo := catalogaccess.NewMemoryRepository()
-	catalogRepo.Users["user-1"] = &catalogaccess.User{ID: "user-1", Email: "user@test.com", Name: "Test User"}
-	catalogRepo.Offerings["offering-1"] = &catalogaccess.Offering{ID: "offering-1", Name: "Premium Access", Price: 5000, Currency: "ARS", Active: true}
-	catalogConsumer := catalogaccess.NewConsumerHandler(catalogRepo, b, logger)
+	catalogRepo := catalogrepository.NewMemoryRepository()
+	catalogRepo.Users["user-1"] = &catalogdomain.User{ID: "user-1", Email: "user@test.com", Name: "Test User"}
+	catalogRepo.Offerings["offering-1"] = &catalogdomain.Offering{ID: "offering-1", Name: "Premium Access", Price: 5000, Currency: "ARS", Active: true}
+	catalogConsumer := catalogconsumer.NewHandler(catalogservice.New(catalogRepo), b, logger)
 
 	// -- Payments (provider) --
 	provider := &configurableProvider{success: true}
-	paymentsConsumer := payments.NewConsumerHandler(provider, b, logger)
+	paymentsConsumer := paymentsconsumer.NewHandler(processdeposit.New(provider, b, logger))
 
 	// -- Saga --
 	sagaRepo := sagarepository.NewMemoryRepository()

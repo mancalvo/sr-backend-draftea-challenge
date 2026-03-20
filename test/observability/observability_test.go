@@ -19,12 +19,18 @@ import (
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/rabbitmq"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments"
+	catalogapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/api"
+	catalogrepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/repository"
+	catalogservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/service"
+	paymentsapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/api"
+	paymentsrepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/repository"
+	paymentsservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/service"
 	sagaapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/api"
 	sagaclient "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
 	sagarepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets"
+	walletsapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/api"
+	walletsrepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/repository"
+	walletsservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/service"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -34,20 +40,20 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestHealth_Payments(t *testing.T) {
-	h := payments.NewHandler(payments.NewMemoryRepository(), discardLogger())
-	router := payments.NewRouter(h, discardLogger())
+	h := paymentsapi.NewHandler(paymentsservice.New(paymentsrepository.NewMemoryRepository()), discardLogger())
+	router := paymentsapi.NewRouter(h, discardLogger())
 	assertHealthOK(t, router, "payments")
 }
 
 func TestHealth_Wallets(t *testing.T) {
-	h := wallets.NewHandler(wallets.NewMemoryRepository(), discardLogger())
-	router := wallets.NewRouter(h, discardLogger())
+	h := walletsapi.NewHandler(walletsservice.New(walletsrepository.NewMemoryRepository()), discardLogger())
+	router := walletsapi.NewRouter(h, discardLogger())
 	assertHealthOK(t, router, "wallets")
 }
 
 func TestHealth_CatalogAccess(t *testing.T) {
-	h := catalogaccess.NewHandler(catalogaccess.NewMemoryRepository(), discardLogger())
-	router := catalogaccess.NewRouter(h, discardLogger())
+	h := catalogapi.NewHandler(catalogservice.New(catalogrepository.NewMemoryRepository()), discardLogger())
+	router := catalogapi.NewRouter(h, discardLogger())
 	assertHealthOK(t, router, "catalog-access")
 }
 
@@ -65,8 +71,8 @@ func TestHealth_SagaOrchestrator(t *testing.T) {
 }
 
 func TestHealth_WithReadinessCheckers_OK(t *testing.T) {
-	h := payments.NewHandler(payments.NewMemoryRepository(), discardLogger())
-	router := payments.NewRouter(h, discardLogger(),
+	h := paymentsapi.NewHandler(paymentsservice.New(paymentsrepository.NewMemoryRepository()), discardLogger())
+	router := paymentsapi.NewRouter(h, discardLogger(),
 		&health.DBPinger{Pinger: &mockPinger{}},
 		&health.RabbitMQChecker{Conn: &mockConn{closed: false}},
 	)
@@ -91,8 +97,8 @@ func TestHealth_WithReadinessCheckers_OK(t *testing.T) {
 }
 
 func TestHealth_WithReadinessCheckers_Degraded(t *testing.T) {
-	h := payments.NewHandler(payments.NewMemoryRepository(), discardLogger())
-	router := payments.NewRouter(h, discardLogger(),
+	h := paymentsapi.NewHandler(paymentsservice.New(paymentsrepository.NewMemoryRepository()), discardLogger())
+	router := paymentsapi.NewRouter(h, discardLogger(),
 		&health.DBPinger{Pinger: &mockPinger{}},
 		&health.RabbitMQChecker{Conn: &mockConn{closed: true}},
 	)

@@ -20,7 +20,10 @@ import (
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/rabbitmq"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess"
+	catalogapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/api"
+	catalogconsumer "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/consumer"
+	catalogrepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/repository"
+	catalogservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/service"
 )
 
 func main() {
@@ -49,7 +52,7 @@ func main() {
 	}
 
 	// Repository
-	repo := catalogaccess.NewPostgresRepository(db)
+	repo := catalogrepository.NewPostgresRepository(db)
 
 	// RabbitMQ connection (with retry for Docker Compose startup ordering)
 	rmqCfg := config.LoadRabbitMQ()
@@ -89,11 +92,12 @@ func main() {
 	consumer := rabbitmq.NewConsumer(consCh, logger, rabbitmq.DefaultRetryConfig())
 
 	// Handlers
-	httpHandler := catalogaccess.NewHandler(repo, logger)
-	amqpHandler := catalogaccess.NewConsumerHandler(repo, publisher, logger)
+	catalogService := catalogservice.New(repo)
+	httpHandler := catalogapi.NewHandler(catalogService, logger)
+	amqpHandler := catalogconsumer.NewHandler(catalogService, publisher, logger)
 
 	// HTTP server with readiness checks
-	router := catalogaccess.NewRouter(httpHandler, logger,
+	router := catalogapi.NewRouter(httpHandler, logger,
 		&health.DBPinger{Pinger: db},
 		&health.RabbitMQChecker{Conn: rmqConn},
 	)

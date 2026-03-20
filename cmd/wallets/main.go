@@ -20,7 +20,10 @@ import (
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/rabbitmq"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets"
+	walletsapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/api"
+	walletsconsumer "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/consumer"
+	walletsrepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/repository"
+	walletsservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/service"
 )
 
 func main() {
@@ -49,7 +52,7 @@ func main() {
 	}
 
 	// Repository
-	repo := wallets.NewPostgresRepository(db)
+	repo := walletsrepository.NewPostgresRepository(db)
 
 	// RabbitMQ connection (with retry for Docker Compose startup ordering)
 	rmqCfg := config.LoadRabbitMQ()
@@ -89,11 +92,12 @@ func main() {
 	consumer := rabbitmq.NewConsumer(consCh, logger, rabbitmq.DefaultRetryConfig())
 
 	// Handlers
-	httpHandler := wallets.NewHandler(repo, logger)
-	amqpHandler := wallets.NewConsumerHandler(repo, publisher, logger)
+	walletService := walletsservice.New(repo)
+	httpHandler := walletsapi.NewHandler(walletService, logger)
+	amqpHandler := walletsconsumer.NewHandler(walletService, publisher, logger)
 
 	// HTTP server with readiness checks
-	router := wallets.NewRouter(httpHandler, logger,
+	router := walletsapi.NewRouter(httpHandler, logger,
 		&health.DBPinger{Pinger: db},
 		&health.RabbitMQChecker{Conn: rmqConn},
 	)
