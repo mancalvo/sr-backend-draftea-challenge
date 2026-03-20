@@ -21,7 +21,9 @@ import (
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/rabbitmq"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga"
+	sagaapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/api"
+	sagaclient "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
+	sagarepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -50,15 +52,15 @@ func TestHealth_CatalogAccess(t *testing.T) {
 }
 
 func TestHealth_SagaOrchestrator(t *testing.T) {
-	h := saga.NewHandler(
-		saga.NewMemoryRepository(),
+	h := sagaapi.NewHandler(
+		sagarepository.NewMemoryRepository(),
 		&noopCatalogClient{},
 		&noopPaymentsClient{},
 		&noopPublisher{},
 		30*time.Second,
 		discardLogger(),
 	)
-	router := saga.NewRouter(h, discardLogger())
+	router := sagaapi.NewRouter(h, discardLogger())
 	assertHealthOK(t, router, "saga-orchestrator")
 }
 
@@ -374,25 +376,25 @@ type mockConn struct{ closed bool }
 
 func (m *mockConn) IsClosed() bool { return m.closed }
 
-// noopCatalogClient satisfies saga.CatalogClient for testing.
+// noopCatalogClient satisfies the saga catalog client dependency for testing.
 type noopCatalogClient struct{}
 
-func (c *noopCatalogClient) PurchasePrecheck(_ context.Context, _, _ string) (*saga.PrecheckResult, error) {
-	return &saga.PrecheckResult{Allowed: true, Price: 5000, Currency: "ARS"}, nil
+func (c *noopCatalogClient) PurchasePrecheck(_ context.Context, _, _ string) (*sagaclient.PrecheckResult, error) {
+	return &sagaclient.PrecheckResult{Allowed: true, Price: 5000, Currency: "ARS"}, nil
 }
-func (c *noopCatalogClient) RefundPrecheck(_ context.Context, _, _, _ string) (*saga.PrecheckResult, error) {
-	return &saga.PrecheckResult{Allowed: true}, nil
+func (c *noopCatalogClient) RefundPrecheck(_ context.Context, _, _, _ string) (*sagaclient.PrecheckResult, error) {
+	return &sagaclient.PrecheckResult{Allowed: true}, nil
 }
 
-// noopPaymentsClient satisfies saga.PaymentsClient for testing.
+// noopPaymentsClient satisfies the saga payments client dependency for testing.
 type noopPaymentsClient struct{}
 
-func (c *noopPaymentsClient) RegisterTransaction(_ context.Context, _ saga.RegisterTransactionRequest) (*saga.RegisterTransactionResponse, error) {
-	return &saga.RegisterTransactionResponse{}, nil
+func (c *noopPaymentsClient) RegisterTransaction(_ context.Context, _ sagaclient.RegisterTransactionRequest) (*sagaclient.RegisterTransactionResponse, error) {
+	return &sagaclient.RegisterTransactionResponse{}, nil
 }
-func (c *noopPaymentsClient) GetTransaction(_ context.Context, transactionID string) (*saga.TransactionDetails, error) {
+func (c *noopPaymentsClient) GetTransaction(_ context.Context, transactionID string) (*sagaclient.TransactionDetails, error) {
 	offeringID := "offering-1"
-	return &saga.TransactionDetails{
+	return &sagaclient.TransactionDetails{
 		ID:         transactionID,
 		UserID:     "user-1",
 		Type:       "purchase",
@@ -406,7 +408,7 @@ func (c *noopPaymentsClient) UpdateTransactionStatus(_ context.Context, _, _ str
 	return nil
 }
 
-// noopPublisher satisfies saga.Publisher for testing.
+// noopPublisher satisfies the saga publisher dependency for testing.
 type noopPublisher struct{}
 
 func (p *noopPublisher) Publish(_ context.Context, _, _, _ string, _ any) error { return nil }

@@ -29,7 +29,12 @@ import (
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga"
+	sagaapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/api"
+	sagaclient "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
+	sagaconsumer "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/consumer"
+	sagadomain "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
+	sagarepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
+	timeoutusecase "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/timeout"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets"
 )
 
@@ -109,9 +114,9 @@ type testHarness struct {
 	bus *bus
 
 	// Saga
-	sagaRepo     *saga.MemoryRepository
-	sagaConsumer *saga.ConsumerHandler
-	sagaHandler  *saga.Handler
+	sagaRepo     *sagarepository.MemoryRepository
+	sagaConsumer *sagaconsumer.Handler
+	sagaHandler  *sagaapi.Handler
 	sagaRouter   http.Handler
 
 	// Wallets
@@ -161,18 +166,18 @@ func (p *configurableProvider) Charge(ctx context.Context, transactionID, _ stri
 	}, nil
 }
 
-// paymentsHTTPClient is a saga.PaymentsClient backed by an httptest server.
+// paymentsHTTPClient is a saga payments client backed by an httptest server.
 type paymentsHTTPClient struct {
 	server *httptest.Server
 }
 
-func (c *paymentsHTTPClient) RegisterTransaction(_ context.Context, req saga.RegisterTransactionRequest) (*saga.RegisterTransactionResponse, error) {
-	return &saga.RegisterTransactionResponse{ID: req.ID, Status: "pending"}, nil
+func (c *paymentsHTTPClient) RegisterTransaction(_ context.Context, req sagaclient.RegisterTransactionRequest) (*sagaclient.RegisterTransactionResponse, error) {
+	return &sagaclient.RegisterTransactionResponse{ID: req.ID, Status: "pending"}, nil
 }
 
-func (c *paymentsHTTPClient) GetTransaction(_ context.Context, transactionID string) (*saga.TransactionDetails, error) {
+func (c *paymentsHTTPClient) GetTransaction(_ context.Context, transactionID string) (*sagaclient.TransactionDetails, error) {
 	offeringID := "offering-1"
-	return &saga.TransactionDetails{
+	return &sagaclient.TransactionDetails{
 		ID:         transactionID,
 		UserID:     "user-1",
 		Type:       "purchase",
@@ -187,7 +192,7 @@ func (c *paymentsHTTPClient) UpdateTransactionStatus(_ context.Context, _ string
 	return nil
 }
 
-// catalogHTTPClient is a saga.CatalogClient that always allows.
+// catalogHTTPClient is a saga catalog client that always allows.
 type catalogHTTPClient struct {
 	purchaseAllowed bool
 	purchaseReason  string
@@ -195,8 +200,8 @@ type catalogHTTPClient struct {
 	refundReason    string
 }
 
-func (c *catalogHTTPClient) PurchasePrecheck(_ context.Context, _, _ string) (*saga.PrecheckResult, error) {
-	return &saga.PrecheckResult{
+func (c *catalogHTTPClient) PurchasePrecheck(_ context.Context, _, _ string) (*sagaclient.PrecheckResult, error) {
+	return &sagaclient.PrecheckResult{
 		Allowed:  c.purchaseAllowed,
 		Reason:   c.purchaseReason,
 		Price:    5000,
@@ -204,8 +209,8 @@ func (c *catalogHTTPClient) PurchasePrecheck(_ context.Context, _, _ string) (*s
 	}, nil
 }
 
-func (c *catalogHTTPClient) RefundPrecheck(_ context.Context, _, _, _ string) (*saga.PrecheckResult, error) {
-	return &saga.PrecheckResult{Allowed: c.refundAllowed, Reason: c.refundReason}, nil
+func (c *catalogHTTPClient) RefundPrecheck(_ context.Context, _, _, _ string) (*sagaclient.PrecheckResult, error) {
+	return &sagaclient.PrecheckResult{Allowed: c.refundAllowed, Reason: c.refundReason}, nil
 }
 
 func newHarness(t *testing.T) *testHarness {
@@ -235,11 +240,11 @@ func newHarness(t *testing.T) *testHarness {
 	paymentsConsumer := payments.NewConsumerHandler(provider, b, logger)
 
 	// -- Saga --
-	sagaRepo := saga.NewMemoryRepository()
+	sagaRepo := sagarepository.NewMemoryRepository()
 	paymentsClient := &paymentsHTTPClient{}
 	catalogClient := &catalogHTTPClient{purchaseAllowed: true, refundAllowed: true}
-	sagaConsumer := saga.NewConsumerHandler(sagaRepo, paymentsClient, b, logger)
-	sagaHandler := saga.NewHandler(sagaRepo, catalogClient, paymentsClient, b, 30*time.Second, logger)
+	sagaConsumer := sagaconsumer.NewHandler(sagaRepo, paymentsClient, b, logger)
+	sagaHandler := sagaapi.NewHandler(sagaRepo, catalogClient, paymentsClient, b, 30*time.Second, logger)
 
 	// Wire up the bus:
 	// Commands -> service handlers
@@ -320,7 +325,7 @@ func TestIntegration_PurchaseHappyPath(t *testing.T) {
 	h := newHarness(t)
 
 	// Submit a purchase command.
-	rec := h.postJSON(t, "/purchases", saga.PurchaseCommand{
+	rec := h.postJSON(t, "/purchases", sagaapi.PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
 		IdempotencyKey: "int-pur-happy-1",
@@ -343,10 +348,10 @@ func TestIntegration_PurchaseHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get saga: %v", err)
 	}
-	if s.Status != saga.StatusCompleted {
+	if s.Status != sagadomain.StatusCompleted {
 		t.Errorf("saga status = %s, want completed", s.Status)
 	}
-	if s.Outcome == nil || *s.Outcome != saga.OutcomeSucceeded {
+	if s.Outcome == nil || *s.Outcome != sagadomain.OutcomeSucceeded {
 		t.Errorf("saga outcome = %v, want succeeded", s.Outcome)
 	}
 
@@ -396,7 +401,7 @@ func TestIntegration_PurchaseInsufficientFunds(t *testing.T) {
 	// Set wallet balance to be insufficient.
 	h.walletRepo.Wallets["user-1"].Balance = 1000
 
-	rec := h.postJSON(t, "/purchases", saga.PurchaseCommand{
+	rec := h.postJSON(t, "/purchases", sagaapi.PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
 		IdempotencyKey: "int-pur-insuf-1",
@@ -412,10 +417,10 @@ func TestIntegration_PurchaseInsufficientFunds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get saga: %v", err)
 	}
-	if s.Status != saga.StatusFailed {
+	if s.Status != sagadomain.StatusFailed {
 		t.Errorf("saga status = %s, want failed", s.Status)
 	}
-	if s.Outcome == nil || *s.Outcome != saga.OutcomeFailed {
+	if s.Outcome == nil || *s.Outcome != sagadomain.OutcomeFailed {
 		t.Errorf("saga outcome = %v, want failed", s.Outcome)
 	}
 
@@ -482,7 +487,7 @@ func TestIntegration_ConcurrentPurchaseSafety(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			results[idx] = h.postJSON(t, "/purchases", saga.PurchaseCommand{
+			results[idx] = h.postJSON(t, "/purchases", sagaapi.PurchaseCommand{
 				UserID:         "user-1",
 				OfferingID:     "offering-1",
 				IdempotencyKey: fmt.Sprintf("int-pur-concurrent-%d", idx),
@@ -520,16 +525,16 @@ func TestIntegration_ConcurrentPurchaseSafety(t *testing.T) {
 			t.Fatalf("get saga for %s: %v", txnID, err)
 		}
 		switch s.Status {
-		case saga.StatusCompleted:
+		case sagadomain.StatusCompleted:
 			completed++
-		case saga.StatusFailed:
+		case sagadomain.StatusFailed:
 			failed++
 		default:
 			// A second purchase attempt that finds the access already granted
 			// will get access.grant.conflicted, triggering compensation.
 			// The compensation refunds the debit, so the saga ends as completed
 			// with outcome compensated.
-			if s.Outcome != nil && *s.Outcome == saga.OutcomeCompensated {
+			if s.Outcome != nil && *s.Outcome == sagadomain.OutcomeCompensated {
 				completed++ // Compensated is a terminal completed state.
 			} else {
 				t.Logf("saga %s: status=%s outcome=%v", txnID, s.Status, s.Outcome)
@@ -543,7 +548,7 @@ func TestIntegration_ConcurrentPurchaseSafety(t *testing.T) {
 	successCount := 0
 	for _, txnID := range txnIDs {
 		s, _ := h.sagaRepo.GetSagaByTransactionID(context.Background(), txnID)
-		if s.Outcome != nil && *s.Outcome == saga.OutcomeSucceeded {
+		if s.Outcome != nil && *s.Outcome == sagadomain.OutcomeSucceeded {
 			successCount++
 		}
 	}
@@ -578,7 +583,7 @@ func TestIntegration_DepositTimeoutHandling(t *testing.T) {
 	// bus doesn't auto-dispatch the provider call.
 	delete(h.bus.handlers, messaging.RoutingKeyDepositRequested)
 
-	rec := h.postJSON(t, "/deposits", saga.DepositCommand{
+	rec := h.postJSON(t, "/deposits", sagaapi.DepositCommand{
 		UserID:         "user-1",
 		Amount:         10000,
 		Currency:       "ARS",
@@ -595,13 +600,13 @@ func TestIntegration_DepositTimeoutHandling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get saga: %v", err)
 	}
-	if s.Status != saga.StatusRunning {
+	if s.Status != sagadomain.StatusRunning {
 		t.Fatalf("saga status = %s, want running", s.Status)
 	}
 
 	// Simulate timeout: the timeout poller transitions the saga to timed_out.
 	paymentsClient := &paymentsHTTPClient{}
-	poller := saga.NewTimeoutPoller(h.sagaRepo, paymentsClient, saga.TimeoutConfig{
+	poller := timeoutusecase.NewTimeoutPoller(h.sagaRepo, paymentsClient, timeoutusecase.TimeoutConfig{
 		PollInterval: 1 * time.Second,
 		SagaTimeout:  30 * time.Second,
 	}, discardLogger())
@@ -617,14 +622,14 @@ func TestIntegration_DepositTimeoutHandling(t *testing.T) {
 	// to verify, and then manually transition.
 
 	// Direct transition to timed_out (simulating what the poller does).
-	_, err = h.sagaRepo.UpdateSagaStatus(context.Background(), s.ID, saga.StatusTimedOut, nil, s.CurrentStep)
+	_, err = h.sagaRepo.UpdateSagaStatus(context.Background(), s.ID, sagadomain.StatusTimedOut, nil, s.CurrentStep)
 	if err != nil {
 		t.Fatalf("transition to timed_out: %v", err)
 	}
 
 	// Verify saga is timed_out.
 	s, _ = h.sagaRepo.GetSagaByTransactionID(context.Background(), txnID)
-	if s.Status != saga.StatusTimedOut {
+	if s.Status != sagadomain.StatusTimedOut {
 		t.Fatalf("saga status = %s, want timed_out", s.Status)
 	}
 
@@ -652,10 +657,10 @@ func TestIntegration_DepositTimeoutHandling(t *testing.T) {
 
 	// Verify saga is completed with succeeded outcome (late success recovery).
 	s, _ = h.sagaRepo.GetSagaByTransactionID(context.Background(), txnID)
-	if s.Status != saga.StatusCompleted {
+	if s.Status != sagadomain.StatusCompleted {
 		t.Errorf("saga status = %s, want completed", s.Status)
 	}
-	if s.Outcome == nil || *s.Outcome != saga.OutcomeSucceeded {
+	if s.Outcome == nil || *s.Outcome != sagadomain.OutcomeSucceeded {
 		t.Errorf("saga outcome = %v, want succeeded", s.Outcome)
 	}
 
@@ -680,7 +685,7 @@ func TestIntegration_RefundHappyPath(t *testing.T) {
 	h := newHarness(t)
 
 	// First, complete a purchase so we have an access record to refund.
-	rec := h.postJSON(t, "/purchases", saga.PurchaseCommand{
+	rec := h.postJSON(t, "/purchases", sagaapi.PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
 		IdempotencyKey: "int-ref-purchase-1",
@@ -692,7 +697,7 @@ func TestIntegration_RefundHappyPath(t *testing.T) {
 
 	// Verify purchase completed.
 	purchaseSaga, _ := h.sagaRepo.GetSagaByTransactionID(context.Background(), purchaseTxnID)
-	if purchaseSaga.Status != saga.StatusCompleted {
+	if purchaseSaga.Status != sagadomain.StatusCompleted {
 		t.Fatalf("purchase saga status = %s, want completed", purchaseSaga.Status)
 	}
 
@@ -709,7 +714,7 @@ func TestIntegration_RefundHappyPath(t *testing.T) {
 	}
 
 	// Now submit a refund.
-	rec = h.postJSON(t, "/refunds", saga.RefundCommand{
+	rec = h.postJSON(t, "/refunds", sagaapi.RefundCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
 		TransactionID:  purchaseTxnID,
@@ -728,10 +733,10 @@ func TestIntegration_RefundHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get refund saga: %v", err)
 	}
-	if refundSaga.Status != saga.StatusCompleted {
+	if refundSaga.Status != sagadomain.StatusCompleted {
 		t.Errorf("refund saga status = %s, want completed", refundSaga.Status)
 	}
-	if refundSaga.Outcome == nil || *refundSaga.Outcome != saga.OutcomeSucceeded {
+	if refundSaga.Outcome == nil || *refundSaga.Outcome != sagadomain.OutcomeSucceeded {
 		t.Errorf("refund saga outcome = %v, want succeeded", refundSaga.Outcome)
 	}
 

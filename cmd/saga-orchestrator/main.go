@@ -19,7 +19,11 @@ import (
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/rabbitmq"
-	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga"
+	sagaapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/api"
+	sagaclient "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
+	sagaconsumer "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/consumer"
+	sagarepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
+	timeoutusecase "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/usecases/timeout"
 )
 
 func main() {
@@ -48,7 +52,7 @@ func main() {
 	}
 
 	// Repository
-	repo := saga.NewPostgresRepository(db)
+	repo := sagarepository.NewPostgresRepository(db)
 
 	// RabbitMQ connection (with retry for Docker Compose startup ordering)
 	rmqCfg := config.LoadRabbitMQ()
@@ -92,25 +96,25 @@ func main() {
 	catalogBaseURL := config.GetEnv("CATALOG_ACCESS_URL", "http://localhost:8084")
 	paymentsBaseURL := config.GetEnv("PAYMENTS_URL", "http://localhost:8082")
 
-	catalogClient := saga.NewHTTPCatalogClient(catalogBaseURL, syncTimeout)
-	paymentsClient := saga.NewHTTPPaymentsClient(paymentsBaseURL, syncTimeout)
+	catalogClient := sagaclient.NewHTTPCatalogClient(catalogBaseURL, syncTimeout)
+	paymentsClient := sagaclient.NewHTTPPaymentsClient(paymentsBaseURL, syncTimeout)
 
 	// Saga timeout configuration
 	sagaTimeout := config.GetEnvDuration("SAGA_TIMEOUT", 30*time.Second)
 	pollInterval := config.GetEnvDuration("TIMEOUT_POLL_INTERVAL", 5*time.Second)
 
 	// Handlers
-	httpHandler := saga.NewHandler(repo, catalogClient, paymentsClient, publisher, sagaTimeout, logger)
-	amqpHandler := saga.NewConsumerHandler(repo, paymentsClient, publisher, logger)
+	httpHandler := sagaapi.NewHandler(repo, catalogClient, paymentsClient, publisher, sagaTimeout, logger)
+	amqpHandler := sagaconsumer.NewHandler(repo, paymentsClient, publisher, logger)
 
 	// Timeout poller
-	timeoutPoller := saga.NewTimeoutPoller(repo, paymentsClient, saga.TimeoutConfig{
+	timeoutPoller := timeoutusecase.NewTimeoutPoller(repo, paymentsClient, timeoutusecase.TimeoutConfig{
 		PollInterval: pollInterval,
 		SagaTimeout:  sagaTimeout,
 	}, logger)
 
 	// HTTP server with readiness checks
-	router := saga.NewRouter(httpHandler, logger,
+	router := sagaapi.NewRouter(httpHandler, logger,
 		&health.DBPinger{Pinger: db},
 		&health.RabbitMQChecker{Conn: rmqConn},
 	)
