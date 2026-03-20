@@ -1,4 +1,4 @@
-package wallets
+package repository
 
 import (
 	"context"
@@ -7,6 +7,15 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/domain"
+)
+
+type Wallet = domain.Wallet
+
+const (
+	MovementTypeCredit = domain.MovementTypeCredit
+	MovementTypeDebit  = domain.MovementTypeDebit
 )
 
 // seedRepo creates a MemoryRepository with one wallet for user-1.

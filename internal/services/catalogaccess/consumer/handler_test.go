@@ -1,13 +1,77 @@
-package catalogaccess
+package consumer
 
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/repository"
+	catalogservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/service"
 )
+
+var NewMemoryRepository = repository.NewMemoryRepository
+
+type (
+	MemoryRepository = repository.MemoryRepository
+	User             = domain.User
+	Offering         = domain.Offering
+	AccessRecord     = domain.AccessRecord
+)
+
+const (
+	AccessStatusActive  = domain.AccessStatusActive
+	AccessStatusRevoked = domain.AccessStatusRevoked
+)
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func NewConsumerHandler(repo catalogservice.Repository, publisher Publisher, logger *slog.Logger) *Handler {
+	return NewHandler(catalogservice.New(repo), publisher, logger)
+}
+
+func seedRepo(withAccess bool) *MemoryRepository {
+	repo := NewMemoryRepository()
+	repo.Users["user-1"] = &User{
+		ID:    "user-1",
+		Email: "test@example.com",
+		Name:  "Test User",
+	}
+	repo.Offerings["offering-1"] = &Offering{
+		ID:       "offering-1",
+		Name:     "Premium Plan",
+		Price:    10000,
+		Currency: "ARS",
+		Active:   true,
+	}
+	repo.Offerings["offering-inactive"] = &Offering{
+		ID:       "offering-inactive",
+		Name:     "Deprecated Plan",
+		Price:    5000,
+		Currency: "ARS",
+		Active:   false,
+	}
+	if withAccess {
+		now := time.Now().UTC()
+		repo.AccessRecords = append(repo.AccessRecords, &AccessRecord{
+			ID:            "ar-seed",
+			UserID:        "user-1",
+			OfferingID:    "offering-1",
+			TransactionID: "txn-original",
+			Status:        AccessStatusActive,
+			GrantedAt:     now,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		})
+	}
+	return repo
+}
 
 // mockPublisher records publish calls for test verification.
 type mockPublisher struct {

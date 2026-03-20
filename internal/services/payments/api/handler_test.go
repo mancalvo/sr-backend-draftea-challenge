@@ -1,4 +1,4 @@
-package payments
+package api
 
 import (
 	"bytes"
@@ -15,6 +15,27 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/domain"
+	paymentsrepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/repository"
+	paymentsservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/service"
+)
+
+var NewMemoryRepository = paymentsrepository.NewMemoryRepository
+
+type (
+	Transaction       = domain.Transaction
+	TransactionType   = domain.TransactionType
+	TransactionStatus = domain.TransactionStatus
+)
+
+const (
+	TransactionTypeDeposit  = domain.TransactionTypeDeposit
+	TransactionTypePurchase = domain.TransactionTypePurchase
+	TransactionTypeRefund   = domain.TransactionTypeRefund
+
+	StatusPending   = domain.StatusPending
+	StatusCompleted = domain.StatusCompleted
+	StatusFailed    = domain.StatusFailed
 )
 
 func testLogger() *slog.Logger {
@@ -36,7 +57,7 @@ func newTestRouter(handler *Handler) http.Handler {
 
 func TestCreateTransaction_Success(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(CreateTransactionRequest{
@@ -74,7 +95,7 @@ func TestCreateTransaction_Success(t *testing.T) {
 
 func TestCreateTransaction_WithOfferingID(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	offeringID := "offering-1"
@@ -105,7 +126,7 @@ func TestCreateTransaction_WithOfferingID(t *testing.T) {
 
 func TestCreateTransaction_RefundRequiresOriginalTransactionID(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(CreateTransactionRequest{
@@ -127,7 +148,7 @@ func TestCreateTransaction_RefundRequiresOriginalTransactionID(t *testing.T) {
 
 func TestCreateTransaction_RefundPersistsOriginalTransactionID(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	originalTransactionID := "txn-purchase-1"
@@ -160,7 +181,7 @@ func TestCreateTransaction_RefundPersistsOriginalTransactionID(t *testing.T) {
 
 func TestCreateTransaction_DuplicateID(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(CreateTransactionRequest{
@@ -200,7 +221,7 @@ func TestCreateTransaction_DuplicateID(t *testing.T) {
 
 func TestCreateTransaction_MissingFields(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(CreateTransactionRequest{
@@ -219,7 +240,7 @@ func TestCreateTransaction_MissingFields(t *testing.T) {
 
 func TestCreateTransaction_InvalidType(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(map[string]any{
@@ -241,7 +262,7 @@ func TestCreateTransaction_InvalidType(t *testing.T) {
 
 func TestCreateTransaction_DefaultCurrency(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(map[string]any{
@@ -271,7 +292,7 @@ func TestCreateTransaction_DefaultCurrency(t *testing.T) {
 
 func TestUpdateTransactionStatus_LegalTransition(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	// Seed a pending transaction.
@@ -300,7 +321,7 @@ func TestUpdateTransactionStatus_LegalTransition(t *testing.T) {
 
 func TestUpdateTransactionStatus_IllegalTransition(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	repo.CreateTransaction(context.Background(), &Transaction{
@@ -327,7 +348,7 @@ func TestUpdateTransactionStatus_IllegalTransition(t *testing.T) {
 
 func TestUpdateTransactionStatus_NotFound(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(UpdateStatusRequest{Status: StatusCompleted})
@@ -343,7 +364,7 @@ func TestUpdateTransactionStatus_NotFound(t *testing.T) {
 
 func TestUpdateTransactionStatus_InvalidStatus(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(map[string]any{"status": "unknown"})
@@ -359,7 +380,7 @@ func TestUpdateTransactionStatus_InvalidStatus(t *testing.T) {
 
 func TestUpdateTransactionStatus_WithReason(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	repo.CreateTransaction(context.Background(), &Transaction{
@@ -388,7 +409,7 @@ func TestUpdateTransactionStatus_WithReason(t *testing.T) {
 
 func TestUpdateTransactionStatus_WithProviderReference(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	repo.CreateTransaction(context.Background(), &Transaction{
@@ -419,7 +440,7 @@ func TestUpdateTransactionStatus_WithProviderReference(t *testing.T) {
 
 func TestGetTransaction_Found(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	offeringID := "offering-1"
@@ -467,7 +488,7 @@ func TestGetTransaction_Found(t *testing.T) {
 
 func TestGetTransaction_NotFound(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	req := httptest.NewRequest(http.MethodGet, "/transactions/nonexistent", nil)
@@ -483,7 +504,7 @@ func TestGetTransaction_NotFound(t *testing.T) {
 
 func TestListTransactions_Empty(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	req := httptest.NewRequest(http.MethodGet, "/transactions?user_id=user-1", nil)
@@ -508,7 +529,7 @@ func TestListTransactions_Empty(t *testing.T) {
 
 func TestListTransactions_MissingUserID(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	req := httptest.NewRequest(http.MethodGet, "/transactions", nil)
@@ -522,7 +543,7 @@ func TestListTransactions_MissingUserID(t *testing.T) {
 
 func TestListTransactions_ReturnsUserTransactionsOnly(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	ctx := context.Background()
@@ -560,7 +581,7 @@ func TestListTransactions_ReturnsUserTransactionsOnly(t *testing.T) {
 
 func TestListTransactions_DefaultLimitApplied(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	ctx := context.Background()
@@ -597,7 +618,7 @@ func TestListTransactions_DefaultLimitApplied(t *testing.T) {
 
 func TestListTransactions_ExplicitLimitRespected(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	ctx := context.Background()
@@ -635,7 +656,7 @@ func TestListTransactions_ExplicitLimitRespected(t *testing.T) {
 
 func TestListTransactions_Page1ReturnsNextCursor(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	ctx := context.Background()
@@ -699,7 +720,7 @@ func TestListTransactions_Page1ReturnsNextCursor(t *testing.T) {
 
 func TestListTransactions_InvalidCursorReturnsError(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	req := httptest.NewRequest(http.MethodGet, "/transactions?user_id=user-1&cursor=not-a-valid-cursor", nil)
@@ -719,7 +740,7 @@ func TestListTransactions_InvalidCursorReturnsError(t *testing.T) {
 
 func TestListTransactions_InvalidLimitReturnsError(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	tests := []struct {
@@ -752,7 +773,7 @@ func TestListTransactions_InvalidLimitReturnsError(t *testing.T) {
 
 func TestListTransactions_StableOrderWithSameCreatedAt(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(paymentsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	// Insert transactions with the same timestamp directly.

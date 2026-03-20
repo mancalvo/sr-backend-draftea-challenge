@@ -1,13 +1,26 @@
-package payments
+package consumer
 
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/usecases/processdeposit"
 )
+
+type ChargeResult = processdeposit.ChargeResult
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func NewConsumerHandler(provider processdeposit.Provider, publisher processdeposit.Publisher, logger *slog.Logger) *Handler {
+	return NewHandler(processdeposit.New(provider, publisher, logger))
+}
 
 // mockPublisher records publish calls for test verification.
 type mockPublisher struct {

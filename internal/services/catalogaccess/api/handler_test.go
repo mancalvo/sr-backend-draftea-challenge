@@ -1,4 +1,4 @@
-package catalogaccess
+package api
 
 import (
 	"bytes"
@@ -13,6 +13,22 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/repository"
+	catalogservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/service"
+)
+
+var NewMemoryRepository = repository.NewMemoryRepository
+
+type (
+	MemoryRepository = repository.MemoryRepository
+	User             = domain.User
+	Offering         = domain.Offering
+	AccessRecord     = domain.AccessRecord
+)
+
+const (
+	AccessStatusActive = domain.AccessStatusActive
 )
 
 func testLogger() *slog.Logger {
@@ -72,7 +88,7 @@ func newTestRouter(handler *Handler) http.Handler {
 
 func TestGetEntitlements_UserNotFound(t *testing.T) {
 	repo := seedRepo(false)
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	req := httptest.NewRequest(http.MethodGet, "/users/unknown-user/entitlements", nil)
@@ -94,7 +110,7 @@ func TestGetEntitlements_UserNotFound(t *testing.T) {
 
 func TestGetEntitlements_EmptyList(t *testing.T) {
 	repo := seedRepo(false)
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	req := httptest.NewRequest(http.MethodGet, "/users/user-1/entitlements", nil)
@@ -128,7 +144,7 @@ func TestGetEntitlements_EmptyList(t *testing.T) {
 
 func TestGetEntitlements_WithActiveAccess(t *testing.T) {
 	repo := seedRepo(true)
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	req := httptest.NewRequest(http.MethodGet, "/users/user-1/entitlements", nil)
@@ -166,7 +182,7 @@ func TestGetEntitlements_WithActiveAccess(t *testing.T) {
 
 func TestPurchasePrecheck_Allowed(t *testing.T) {
 	repo := seedRepo(false) // no existing access
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(PurchasePrecheckRequest{
@@ -195,7 +211,7 @@ func TestPurchasePrecheck_Allowed(t *testing.T) {
 
 func TestPurchasePrecheck_UserNotFound(t *testing.T) {
 	repo := seedRepo(false)
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(PurchasePrecheckRequest{
@@ -224,7 +240,7 @@ func TestPurchasePrecheck_UserNotFound(t *testing.T) {
 
 func TestPurchasePrecheck_OfferingNotFound(t *testing.T) {
 	repo := seedRepo(false)
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(PurchasePrecheckRequest{
@@ -249,7 +265,7 @@ func TestPurchasePrecheck_OfferingNotFound(t *testing.T) {
 
 func TestPurchasePrecheck_OfferingInactive(t *testing.T) {
 	repo := seedRepo(false)
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(PurchasePrecheckRequest{
@@ -274,7 +290,7 @@ func TestPurchasePrecheck_OfferingInactive(t *testing.T) {
 
 func TestPurchasePrecheck_DuplicateAccess(t *testing.T) {
 	repo := seedRepo(true) // user already has active access
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(PurchasePrecheckRequest{
@@ -299,7 +315,7 @@ func TestPurchasePrecheck_DuplicateAccess(t *testing.T) {
 
 func TestPurchasePrecheck_MissingFields(t *testing.T) {
 	repo := seedRepo(false)
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(PurchasePrecheckRequest{
@@ -320,7 +336,7 @@ func TestPurchasePrecheck_MissingFields(t *testing.T) {
 
 func TestRefundPrecheck_Allowed(t *testing.T) {
 	repo := seedRepo(true) // has active access linked to txn-original
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(RefundPrecheckRequest{
@@ -347,7 +363,7 @@ func TestRefundPrecheck_Allowed(t *testing.T) {
 
 func TestRefundPrecheck_NoActiveAccess(t *testing.T) {
 	repo := seedRepo(false) // no access records
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(RefundPrecheckRequest{
@@ -375,7 +391,7 @@ func TestRefundPrecheck_UserMismatch(t *testing.T) {
 	repo := seedRepo(true) // access is for user-1
 	// Add a second user
 	repo.Users["user-2"] = &User{ID: "user-2", Email: "other@example.com", Name: "Other"}
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(RefundPrecheckRequest{
@@ -398,7 +414,7 @@ func TestRefundPrecheck_UserMismatch(t *testing.T) {
 
 func TestRefundPrecheck_MissingFields(t *testing.T) {
 	repo := seedRepo(false)
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(catalogservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(RefundPrecheckRequest{

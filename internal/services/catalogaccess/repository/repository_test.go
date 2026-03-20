@@ -1,10 +1,61 @@
-package catalogaccess
+package repository
 
 import (
 	"context"
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/domain"
 )
+
+type (
+	User         = domain.User
+	Offering     = domain.Offering
+	AccessRecord = domain.AccessRecord
+)
+
+const (
+	AccessStatusActive  = domain.AccessStatusActive
+	AccessStatusRevoked = domain.AccessStatusRevoked
+)
+
+func seedRepo(withAccess bool) *MemoryRepository {
+	repo := NewMemoryRepository()
+	repo.Users["user-1"] = &User{
+		ID:    "user-1",
+		Email: "test@example.com",
+		Name:  "Test User",
+	}
+	repo.Offerings["offering-1"] = &Offering{
+		ID:       "offering-1",
+		Name:     "Premium Plan",
+		Price:    10000,
+		Currency: "ARS",
+		Active:   true,
+	}
+	repo.Offerings["offering-inactive"] = &Offering{
+		ID:       "offering-inactive",
+		Name:     "Deprecated Plan",
+		Price:    5000,
+		Currency: "ARS",
+		Active:   false,
+	}
+	if withAccess {
+		now := time.Now().UTC()
+		repo.AccessRecords = append(repo.AccessRecords, &AccessRecord{
+			ID:            "ar-seed",
+			UserID:        "user-1",
+			OfferingID:    "offering-1",
+			TransactionID: "txn-original",
+			Status:        AccessStatusActive,
+			GrantedAt:     now,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		})
+	}
+	return repo
+}
 
 // --- MemoryRepository tests validate the domain invariants ---
 

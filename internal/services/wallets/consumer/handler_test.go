@@ -1,13 +1,47 @@
-package wallets
+package consumer
 
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/repository"
+	walletsservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/service"
 )
+
+var NewMemoryRepository = repository.NewMemoryRepository
+
+type (
+	MemoryRepository = repository.MemoryRepository
+	Wallet           = domain.Wallet
+)
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func NewConsumerHandler(repo walletsservice.Repository, publisher Publisher, logger *slog.Logger) *Handler {
+	return NewHandler(walletsservice.New(repo), publisher, logger)
+}
+
+func seedRepo(balance int64) *MemoryRepository {
+	repo := NewMemoryRepository()
+	now := time.Now().UTC()
+	repo.Wallets["user-1"] = &Wallet{
+		ID:        "wallet-1",
+		UserID:    "user-1",
+		Balance:   balance,
+		Currency:  "ARS",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	return repo
+}
 
 // mockPublisher records publish calls for test verification.
 type mockPublisher struct {

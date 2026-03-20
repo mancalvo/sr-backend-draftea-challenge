@@ -1,12 +1,37 @@
-package payments
+package repository
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/domain"
 	"testing"
 	"time"
 )
+
+type (
+	Cursor                 = domain.Cursor
+	ListTransactionsQuery  = domain.ListTransactionsQuery
+	ListTransactionsResult = domain.ListTransactionsResult
+	Transaction            = domain.Transaction
+	TransactionType        = domain.TransactionType
+	TransactionStatus      = domain.TransactionStatus
+)
+
+const (
+	TransactionTypeDeposit  = domain.TransactionTypeDeposit
+	TransactionTypePurchase = domain.TransactionTypePurchase
+	TransactionTypeRefund   = domain.TransactionTypeRefund
+
+	StatusPending                = domain.StatusPending
+	StatusCompleted              = domain.StatusCompleted
+	StatusFailed                 = domain.StatusFailed
+	StatusTimedOut               = domain.StatusTimedOut
+	StatusCompensated            = domain.StatusCompensated
+	StatusReconciliationRequired = domain.StatusReconciliationRequired
+)
+
+var DecodeCursor = domain.DecodeCursor
 
 // --- MemoryRepository tests validate domain invariants ---
 

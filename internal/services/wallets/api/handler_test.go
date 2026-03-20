@@ -1,4 +1,4 @@
-package wallets
+package api
 
 import (
 	"encoding/json"
@@ -7,11 +7,36 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/repository"
+	walletsservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/service"
 )
+
+var NewMemoryRepository = repository.NewMemoryRepository
+
+type (
+	MemoryRepository = repository.MemoryRepository
+	Wallet           = domain.Wallet
+)
+
+func seedRepo(balance int64) *MemoryRepository {
+	repo := NewMemoryRepository()
+	now := time.Now().UTC()
+	repo.Wallets["user-1"] = &Wallet{
+		ID:        "wallet-1",
+		UserID:    "user-1",
+		Balance:   balance,
+		Currency:  "ARS",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	return repo
+}
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -29,7 +54,7 @@ func newTestRouter(handler *Handler) http.Handler {
 
 func TestGetBalance_Success(t *testing.T) {
 	repo := seedRepo(10000)
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(walletsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	req := httptest.NewRequest(http.MethodGet, "/wallets/user-1/balance", nil)
@@ -66,7 +91,7 @@ func TestGetBalance_Success(t *testing.T) {
 
 func TestGetBalance_WalletNotFound(t *testing.T) {
 	repo := NewMemoryRepository()
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(walletsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	req := httptest.NewRequest(http.MethodGet, "/wallets/unknown-user/balance", nil)
@@ -88,7 +113,7 @@ func TestGetBalance_WalletNotFound(t *testing.T) {
 
 func TestGetBalance_AfterDebit(t *testing.T) {
 	repo := seedRepo(10000)
-	h := NewHandler(repo, testLogger())
+	h := NewHandler(walletsservice.New(repo), testLogger())
 	router := newTestRouter(h)
 
 	// Perform a debit first.
