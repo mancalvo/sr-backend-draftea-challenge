@@ -287,6 +287,38 @@ func TestMemoryRepo_UpdateStatus_WithReason(t *testing.T) {
 	}
 }
 
+func TestMemoryRepo_UpdateStatus_SameTargetAndReason_IsIdempotent(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	txn := &Transaction{
+		ID: "txn-1", UserID: "user-1", Type: TransactionTypeDeposit,
+		Status: StatusPending, Amount: 1000, Currency: "ARS",
+	}
+	_, _ = repo.CreateTransaction(ctx, txn)
+
+	reason := "provider declined the charge"
+	first, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusFailed, &reason)
+	if err != nil {
+		t.Fatalf("first update: %v", err)
+	}
+
+	second, err := repo.UpdateTransactionStatus(ctx, "txn-1", StatusFailed, &reason)
+	if err != nil {
+		t.Fatalf("second update: %v", err)
+	}
+
+	if second.Status != StatusFailed {
+		t.Errorf("status = %v, want %v", second.Status, StatusFailed)
+	}
+	if second.StatusReason == nil || *second.StatusReason != reason {
+		t.Errorf("status_reason = %v, want %q", second.StatusReason, reason)
+	}
+	if second.UpdatedAt.Before(first.UpdatedAt) {
+		t.Errorf("updated_at moved backwards: first=%v second=%v", first.UpdatedAt, second.UpdatedAt)
+	}
+}
+
 func TestMemoryRepo_UpdateStatus_TimedOutThenCompleted(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()

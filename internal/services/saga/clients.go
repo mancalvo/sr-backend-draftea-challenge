@@ -22,8 +22,10 @@ type CatalogClient interface {
 
 // PrecheckResult mirrors the catalog-access precheck response.
 type PrecheckResult struct {
-	Allowed bool   `json:"allowed"`
-	Reason  string `json:"reason,omitempty"`
+	Allowed  bool   `json:"allowed"`
+	Reason   string `json:"reason,omitempty"`
+	Price    int64  `json:"price,omitempty"`
+	Currency string `json:"currency,omitempty"`
 }
 
 // PaymentsClient makes synchronous HTTP calls to the payments service
@@ -31,6 +33,9 @@ type PrecheckResult struct {
 type PaymentsClient interface {
 	// RegisterTransaction creates a new pending transaction.
 	RegisterTransaction(ctx context.Context, req RegisterTransactionRequest) (*RegisterTransactionResponse, error)
+
+	// GetTransaction retrieves an existing transaction by ID.
+	GetTransaction(ctx context.Context, transactionID string) (*TransactionDetails, error)
 
 	// UpdateTransactionStatus transitions a transaction to a new status.
 	UpdateTransactionStatus(ctx context.Context, transactionID string, status string, reason *string) error
@@ -50,6 +55,17 @@ type RegisterTransactionRequest struct {
 type RegisterTransactionResponse struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
+}
+
+// TransactionDetails mirrors the payments transaction response needed by saga.
+type TransactionDetails struct {
+	ID         string  `json:"id"`
+	UserID     string  `json:"user_id"`
+	Type       string  `json:"type"`
+	Status     string  `json:"status"`
+	Amount     int64   `json:"amount"`
+	Currency   string  `json:"currency"`
+	OfferingID *string `json:"offering_id,omitempty"`
 }
 
 // ---- HTTP implementations ----
@@ -174,6 +190,34 @@ func (c *HTTPPaymentsClient) RegisterTransaction(ctx context.Context, req Regist
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return nil, fmt.Errorf("decode register response: %w", err)
+	}
+	return &envelope.Data, nil
+}
+
+func (c *HTTPPaymentsClient) GetTransaction(ctx context.Context, transactionID string) (*TransactionDetails, error) {
+	url := fmt.Sprintf("%s/transactions/%s", c.baseURL, transactionID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get transaction request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get transaction returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var envelope struct {
+		Success bool               `json:"success"`
+		Data    TransactionDetails `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("decode get transaction response: %w", err)
 	}
 	return &envelope.Data, nil
 }

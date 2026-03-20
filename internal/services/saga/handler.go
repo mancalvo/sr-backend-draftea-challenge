@@ -177,9 +177,6 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 		httpx.ValidationError(w, fields)
 		return
 	}
-	if cmd.Currency == "" {
-		cmd.Currency = "ARS"
-	}
 
 	logger := logging.FromContext(r.Context()).With(
 		slog.String("user_id", cmd.UserID),
@@ -192,8 +189,6 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 	requestHash := RequestFingerprint(PurchasePayload{
 		UserID:     cmd.UserID,
 		OfferingID: cmd.OfferingID,
-		Amount:     cmd.Amount,
-		Currency:   cmd.Currency,
 	})
 
 	// Check idempotency.
@@ -213,6 +208,11 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 		httpx.ErrorWithCode(w, http.StatusUnprocessableEntity, precheck.Reason, "PRECHECK_DENIED")
 		return
 	}
+	if precheck.Price <= 0 || precheck.Currency == "" {
+		logger.Error("purchase precheck returned invalid pricing", "price", precheck.Price, "currency", precheck.Currency)
+		httpx.Error(w, http.StatusBadGateway, "catalog service unavailable")
+		return
+	}
 
 	transactionID := uuid.New().String()
 	logger = logger.With(slog.String(logging.KeyTransactionID, transactionID))
@@ -222,8 +222,8 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 		ID:         transactionID,
 		UserID:     cmd.UserID,
 		Type:       "purchase",
-		Amount:     cmd.Amount,
-		Currency:   cmd.Currency,
+		Amount:     precheck.Price,
+		Currency:   precheck.Currency,
 		OfferingID: &cmd.OfferingID,
 	})
 	if err != nil {
@@ -236,8 +236,8 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 	payload, _ := json.Marshal(PurchasePayload{
 		UserID:     cmd.UserID,
 		OfferingID: cmd.OfferingID,
-		Amount:     cmd.Amount,
-		Currency:   cmd.Currency,
+		Amount:     precheck.Price,
+		Currency:   precheck.Currency,
 	})
 
 	timeoutAt := time.Now().UTC().Add(h.sagaTimeout)
@@ -271,8 +271,8 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 		messaging.WalletDebitRequested{
 			TransactionID: transactionID,
 			UserID:        cmd.UserID,
-			Amount:        cmd.Amount,
-			Currency:      cmd.Currency,
+			Amount:        precheck.Price,
+			Currency:      precheck.Currency,
 			SourceStep:    step,
 		},
 	); err != nil {
@@ -303,9 +303,6 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 		httpx.ValidationError(w, fields)
 		return
 	}
-	if cmd.Currency == "" {
-		cmd.Currency = "ARS"
-	}
 
 	logger := logging.FromContext(r.Context()).With(
 		slog.String("user_id", cmd.UserID),
@@ -320,8 +317,6 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 		UserID:              cmd.UserID,
 		OfferingID:          cmd.OfferingID,
 		OriginalTransaction: cmd.TransactionID,
-		Amount:              cmd.Amount,
-		Currency:            cmd.Currency,
 	})
 
 	// Check idempotency.
@@ -342,6 +337,29 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	originalTxn, err := h.paymentsClient.GetTransaction(r.Context(), cmd.TransactionID)
+	if err != nil {
+		logger.Error("failed to fetch original transaction", "error", err)
+		httpx.Error(w, http.StatusBadGateway, "payment service unavailable")
+		return
+	}
+	if originalTxn.Type != "purchase" {
+		httpx.ErrorWithCode(w, http.StatusUnprocessableEntity, "original transaction must be a purchase", "INVALID_ORIGINAL_TRANSACTION")
+		return
+	}
+	if originalTxn.UserID != cmd.UserID {
+		httpx.ErrorWithCode(w, http.StatusUnprocessableEntity, "original transaction does not belong to user", "INVALID_ORIGINAL_TRANSACTION")
+		return
+	}
+	if originalTxn.OfferingID == nil || *originalTxn.OfferingID != cmd.OfferingID {
+		httpx.ErrorWithCode(w, http.StatusUnprocessableEntity, "original transaction does not match offering", "INVALID_ORIGINAL_TRANSACTION")
+		return
+	}
+	if originalTxn.Amount <= 0 || originalTxn.Currency == "" {
+		httpx.ErrorWithCode(w, http.StatusUnprocessableEntity, "original transaction has invalid amount", "INVALID_ORIGINAL_TRANSACTION")
+		return
+	}
+
 	transactionID := uuid.New().String()
 	logger = logger.With(slog.String(logging.KeyTransactionID, transactionID))
 
@@ -350,8 +368,8 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 		ID:         transactionID,
 		UserID:     cmd.UserID,
 		Type:       "refund",
-		Amount:     cmd.Amount,
-		Currency:   cmd.Currency,
+		Amount:     originalTxn.Amount,
+		Currency:   originalTxn.Currency,
 		OfferingID: &cmd.OfferingID,
 	})
 	if err != nil {
@@ -365,8 +383,8 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 		UserID:              cmd.UserID,
 		OfferingID:          cmd.OfferingID,
 		OriginalTransaction: cmd.TransactionID,
-		Amount:              cmd.Amount,
-		Currency:            cmd.Currency,
+		Amount:              originalTxn.Amount,
+		Currency:            originalTxn.Currency,
 	})
 
 	timeoutAt := time.Now().UTC().Add(h.sagaTimeout)
@@ -499,9 +517,6 @@ func validatePurchaseCommand(cmd *PurchaseCommand) []httpx.FieldError {
 	if cmd.OfferingID == "" {
 		fields = append(fields, httpx.FieldError{Field: "offering_id", Code: "required"})
 	}
-	if cmd.Amount <= 0 {
-		fields = append(fields, httpx.FieldError{Field: "amount", Code: "must_be_positive"})
-	}
 	if cmd.IdempotencyKey == "" {
 		fields = append(fields, httpx.FieldError{Field: "idempotency_key", Code: "required"})
 	}
@@ -519,9 +534,6 @@ func validateRefundCommand(cmd *RefundCommand) []httpx.FieldError {
 	}
 	if cmd.TransactionID == "" {
 		fields = append(fields, httpx.FieldError{Field: "transaction_id", Code: "required"})
-	}
-	if cmd.Amount <= 0 {
-		fields = append(fields, httpx.FieldError{Field: "amount", Code: "must_be_positive"})
 	}
 	if cmd.IdempotencyKey == "" {
 		fields = append(fields, httpx.FieldError{Field: "idempotency_key", Code: "required"})

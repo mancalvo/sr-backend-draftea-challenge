@@ -126,7 +126,11 @@ func (h *Handler) PurchasePrecheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.JSON(w, http.StatusOK, PrecheckResult{Allowed: true})
+	httpx.JSON(w, http.StatusOK, PrecheckResult{
+		Allowed:  true,
+		Price:    offering.Price,
+		Currency: offering.Currency,
+	})
 }
 
 // RefundPrecheck handles POST /internal/refund-precheck.

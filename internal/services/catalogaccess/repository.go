@@ -29,6 +29,9 @@ type Repository interface {
 	// GetActiveAccessByTransaction returns the active access record linked to a transaction, or ErrNotFound.
 	GetActiveAccessByTransaction(ctx context.Context, transactionID string) (*AccessRecord, error)
 
+	// GetAccessByTransaction returns any access record linked to a transaction, regardless of status.
+	GetAccessByTransaction(ctx context.Context, transactionID string) (*AccessRecord, error)
+
 	// ListEntitlements returns all active entitlements (with offering name) for a user.
 	ListEntitlements(ctx context.Context, userID string) ([]Entitlement, error)
 
@@ -101,6 +104,15 @@ func (r *PostgresRepository) GetActiveAccessByTransaction(ctx context.Context, t
 	return r.scanAccessRecord(r.db.QueryRowContext(ctx, q, transactionID))
 }
 
+func (r *PostgresRepository) GetAccessByTransaction(ctx context.Context, transactionID string) (*AccessRecord, error) {
+	const q = `SELECT id, user_id, offering_id, transaction_id, status, granted_at, revoked_at, created_at, updated_at
+		FROM catalog_access.access_records
+		WHERE transaction_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1`
+	return r.scanAccessRecord(r.db.QueryRowContext(ctx, q, transactionID))
+}
+
 func (r *PostgresRepository) ListEntitlements(ctx context.Context, userID string) ([]Entitlement, error) {
 	const q = `SELECT ar.offering_id, o.name, ar.transaction_id, ar.granted_at
 		FROM catalog_access.access_records ar
@@ -149,7 +161,7 @@ func (r *PostgresRepository) RevokeAccess(ctx context.Context, transactionID str
 		WHERE transaction_id = $1 AND status = 'active'
 		RETURNING id, user_id, offering_id, transaction_id, status, granted_at, revoked_at, created_at, updated_at`
 	ar, err := r.scanAccessRecord(r.db.QueryRowContext(ctx, q, transactionID))
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, ErrNotFound) {
 		return nil, ErrNoActiveAccess
 	}
 	if err != nil {
@@ -249,6 +261,15 @@ func (m *MemoryRepository) GetActiveAccess(_ context.Context, userID, offeringID
 func (m *MemoryRepository) GetActiveAccessByTransaction(_ context.Context, transactionID string) (*AccessRecord, error) {
 	for _, ar := range m.AccessRecords {
 		if ar.TransactionID == transactionID && ar.Status == AccessStatusActive {
+			return ar, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (m *MemoryRepository) GetAccessByTransaction(_ context.Context, transactionID string) (*AccessRecord, error) {
+	for _, ar := range m.AccessRecords {
+		if ar.TransactionID == transactionID {
 			return ar, nil
 		}
 	}

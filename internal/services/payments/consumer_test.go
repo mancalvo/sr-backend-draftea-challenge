@@ -33,12 +33,33 @@ func (m *mockPublisher) Publish(_ context.Context, exchange, routingKey, correla
 
 // mockProvider is a test provider that returns a configurable result.
 type mockProvider struct {
-	result *ChargeResult
-	err    error
+	result            *ChargeResult
+	err               error
+	callCount         int
+	uniqueChargeCount int
+	seenTransactions  map[string]*ChargeResult
 }
 
-func (m *mockProvider) Charge(_ context.Context, _, _ string, _ int64, _ string) (*ChargeResult, error) {
-	return m.result, m.err
+func (m *mockProvider) Charge(_ context.Context, transactionID, _ string, _ int64, _ string) (*ChargeResult, error) {
+	m.callCount++
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.seenTransactions == nil {
+		m.seenTransactions = make(map[string]*ChargeResult)
+	}
+	if cached, ok := m.seenTransactions[transactionID]; ok {
+		result := *cached
+		return &result, nil
+	}
+
+	m.uniqueChargeCount++
+	if m.result == nil {
+		m.result = &ChargeResult{Success: true, ProviderRef: "ref-" + transactionID}
+	}
+	stored := *m.result
+	m.seenTransactions[transactionID] = &stored
+	return &stored, nil
 }
 
 func makeEnvelope(t *testing.T, msgType string, payload any) messaging.Envelope {
@@ -164,5 +185,89 @@ func TestHandleDepositRequested_ProviderError(t *testing.T) {
 	// Should not have published anything on error.
 	if len(pub.calls) != 0 {
 		t.Errorf("expected 0 publish calls on error, got %d", len(pub.calls))
+	}
+}
+
+func TestHandleDepositRequested_DuplicateDelivery_ReplaysSuccessWithoutExtraCharge(t *testing.T) {
+	provider := &mockProvider{
+		result: &ChargeResult{Success: true, ProviderRef: "ref-dup"},
+	}
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(provider, pub, testLogger())
+
+	cmd := messaging.DepositRequested{
+		TransactionID: "txn-dup-success",
+		UserID:        "user-1",
+		Amount:        10000,
+		Currency:      "ARS",
+	}
+	env := makeEnvelope(t, messaging.RoutingKeyDepositRequested, cmd)
+
+	if err := ch.HandleDepositRequested(context.Background(), env); err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	if err := ch.HandleDepositRequested(context.Background(), env); err != nil {
+		t.Fatalf("duplicate delivery: %v", err)
+	}
+
+	if provider.uniqueChargeCount != 1 {
+		t.Fatalf("unique charges = %d, want 1", provider.uniqueChargeCount)
+	}
+	if len(pub.calls) != 2 {
+		t.Fatalf("publish calls = %d, want 2", len(pub.calls))
+	}
+	for i, call := range pub.calls {
+		if call.RoutingKey != messaging.RoutingKeyProviderChargeSucceeded {
+			t.Fatalf("call %d routing key = %q, want %q", i, call.RoutingKey, messaging.RoutingKeyProviderChargeSucceeded)
+		}
+		outcome, ok := call.Payload.(messaging.ProviderChargeSucceeded)
+		if !ok {
+			t.Fatalf("call %d payload type = %T, want ProviderChargeSucceeded", i, call.Payload)
+		}
+		if outcome.ProviderRef != "ref-dup" {
+			t.Fatalf("call %d provider_ref = %q, want ref-dup", i, outcome.ProviderRef)
+		}
+	}
+}
+
+func TestHandleDepositRequested_DuplicateDelivery_ReplaysFailureWithoutExtraCharge(t *testing.T) {
+	provider := &mockProvider{
+		result: &ChargeResult{Success: false, Reason: "card declined"},
+	}
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(provider, pub, testLogger())
+
+	cmd := messaging.DepositRequested{
+		TransactionID: "txn-dup-failure",
+		UserID:        "user-1",
+		Amount:        10000,
+		Currency:      "ARS",
+	}
+	env := makeEnvelope(t, messaging.RoutingKeyDepositRequested, cmd)
+
+	if err := ch.HandleDepositRequested(context.Background(), env); err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	if err := ch.HandleDepositRequested(context.Background(), env); err != nil {
+		t.Fatalf("duplicate delivery: %v", err)
+	}
+
+	if provider.uniqueChargeCount != 1 {
+		t.Fatalf("unique charges = %d, want 1", provider.uniqueChargeCount)
+	}
+	if len(pub.calls) != 2 {
+		t.Fatalf("publish calls = %d, want 2", len(pub.calls))
+	}
+	for i, call := range pub.calls {
+		if call.RoutingKey != messaging.RoutingKeyProviderChargeFailed {
+			t.Fatalf("call %d routing key = %q, want %q", i, call.RoutingKey, messaging.RoutingKeyProviderChargeFailed)
+		}
+		outcome, ok := call.Payload.(messaging.ProviderChargeFailed)
+		if !ok {
+			t.Fatalf("call %d payload type = %T, want ProviderChargeFailed", i, call.Payload)
+		}
+		if outcome.Reason != "card declined" {
+			t.Fatalf("call %d reason = %q, want card declined", i, outcome.Reason)
+		}
 	}
 }

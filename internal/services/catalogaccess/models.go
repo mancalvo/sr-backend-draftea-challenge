@@ -69,6 +69,8 @@ type RefundPrecheckRequest struct {
 
 // PrecheckResult carries the result of a precheck.
 type PrecheckResult struct {
-	Allowed bool   `json:"allowed"`
-	Reason  string `json:"reason,omitempty"`
+	Allowed  bool   `json:"allowed"`
+	Reason   string `json:"reason,omitempty"`
+	Price    int64  `json:"price,omitempty"`
+	Currency string `json:"currency,omitempty"`
 }

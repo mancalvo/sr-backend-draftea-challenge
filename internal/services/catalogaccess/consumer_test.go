@@ -131,6 +131,31 @@ func TestHandleAccessGrantRequested_DuplicateAccess(t *testing.T) {
 	}
 }
 
+func TestHandleAccessGrantRequested_DuplicateRedelivery_ReplaysGranted(t *testing.T) {
+	repo := seedRepo(true) // existing access belongs to txn-original
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(repo, pub, testLogger())
+
+	cmd := messaging.AccessGrantRequested{
+		TransactionID: "txn-original",
+		UserID:        "user-1",
+		OfferingID:    "offering-1",
+	}
+	env := makeEnvelope(t, messaging.RoutingKeyAccessGrantRequested, cmd)
+
+	err := ch.HandleAccessGrantRequested(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(pub.calls) != 1 {
+		t.Fatalf("expected 1 publish call, got %d", len(pub.calls))
+	}
+	if pub.calls[0].RoutingKey != messaging.RoutingKeyAccessGranted {
+		t.Errorf("routing key = %q, want %q", pub.calls[0].RoutingKey, messaging.RoutingKeyAccessGranted)
+	}
+}
+
 // --- access.revoke.requested ---
 
 func TestHandleAccessRevokeRequested_Success(t *testing.T) {
@@ -218,11 +243,11 @@ func TestHandleAccessRevokeRequested_AlreadyRevoked(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should be rejected since the access is already revoked.
+	// Duplicate redelivery after a successful revoke should replay the success outcome.
 	if len(pub.calls) != 1 {
 		t.Fatalf("expected 1 publish call, got %d", len(pub.calls))
 	}
-	if pub.calls[0].RoutingKey != messaging.RoutingKeyAccessRevokeRejected {
-		t.Errorf("routing key = %q, want %q", pub.calls[0].RoutingKey, messaging.RoutingKeyAccessRevokeRejected)
+	if pub.calls[0].RoutingKey != messaging.RoutingKeyAccessRevoked {
+		t.Errorf("routing key = %q, want %q", pub.calls[0].RoutingKey, messaging.RoutingKeyAccessRevoked)
 	}
 }

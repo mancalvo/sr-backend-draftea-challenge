@@ -151,8 +151,6 @@ type DepositCommand struct {
 type PurchaseCommand struct {
 	UserID         string `json:"user_id"`
 	OfferingID     string `json:"offering_id"`
-	Amount         int64  `json:"amount"`
-	Currency       string `json:"currency"`
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
@@ -161,8 +159,6 @@ type RefundCommand struct {
 	UserID         string `json:"user_id"`
 	OfferingID     string `json:"offering_id"`
 	TransactionID  string `json:"transaction_id"` // original purchase transaction
-	Amount         int64  `json:"amount"`
-	Currency       string `json:"currency"`
 	IdempotencyKey string `json:"idempotency_key"`
 }
 

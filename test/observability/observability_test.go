@@ -378,7 +378,7 @@ func (m *mockConn) IsClosed() bool { return m.closed }
 type noopCatalogClient struct{}
 
 func (c *noopCatalogClient) PurchasePrecheck(_ context.Context, _, _ string) (*saga.PrecheckResult, error) {
-	return &saga.PrecheckResult{Allowed: true}, nil
+	return &saga.PrecheckResult{Allowed: true, Price: 5000, Currency: "ARS"}, nil
 }
 func (c *noopCatalogClient) RefundPrecheck(_ context.Context, _, _, _ string) (*saga.PrecheckResult, error) {
 	return &saga.PrecheckResult{Allowed: true}, nil
@@ -389,6 +389,18 @@ type noopPaymentsClient struct{}
 
 func (c *noopPaymentsClient) RegisterTransaction(_ context.Context, _ saga.RegisterTransactionRequest) (*saga.RegisterTransactionResponse, error) {
 	return &saga.RegisterTransactionResponse{}, nil
+}
+func (c *noopPaymentsClient) GetTransaction(_ context.Context, transactionID string) (*saga.TransactionDetails, error) {
+	offeringID := "offering-1"
+	return &saga.TransactionDetails{
+		ID:         transactionID,
+		UserID:     "user-1",
+		Type:       "purchase",
+		Status:     "completed",
+		Amount:     5000,
+		Currency:   "ARS",
+		OfferingID: &offeringID,
+	}, nil
 }
 func (c *noopPaymentsClient) UpdateTransactionStatus(_ context.Context, _, _ string, _ *string) error {
 	return nil

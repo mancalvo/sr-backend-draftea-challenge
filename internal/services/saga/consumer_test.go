@@ -72,6 +72,19 @@ func (c *recordingPaymentsClient) RegisterTransaction(_ context.Context, req Reg
 	return &RegisterTransactionResponse{ID: req.ID, Status: "pending"}, nil
 }
 
+func (c *recordingPaymentsClient) GetTransaction(_ context.Context, transactionID string) (*TransactionDetails, error) {
+	offeringID := "offering-1"
+	return &TransactionDetails{
+		ID:         transactionID,
+		UserID:     "user-1",
+		Type:       "purchase",
+		Status:     "completed",
+		Amount:     5000,
+		Currency:   "ARS",
+		OfferingID: &offeringID,
+	}, nil
+}
+
 func (c *recordingPaymentsClient) UpdateTransactionStatus(_ context.Context, transactionID string, status string, reason *string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -631,8 +644,6 @@ func TestPurchaseFlow_HandlerPurchaseInitiatesWorkflow(t *testing.T) {
 	body, _ := json.Marshal(PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: fmt.Sprintf("pur-init-%d", time.Now().UnixNano()),
 	})
 
@@ -751,6 +762,19 @@ func (c *failingPaymentsClient) RegisterTransaction(_ context.Context, req Regis
 		return c.registerResp, nil
 	}
 	return &RegisterTransactionResponse{ID: req.ID, Status: "pending"}, nil
+}
+
+func (c *failingPaymentsClient) GetTransaction(_ context.Context, transactionID string) (*TransactionDetails, error) {
+	offeringID := "offering-1"
+	return &TransactionDetails{
+		ID:         transactionID,
+		UserID:     "user-1",
+		Type:       "purchase",
+		Status:     "completed",
+		Amount:     5000,
+		Currency:   "ARS",
+		OfferingID: &offeringID,
+	}, nil
 }
 
 func (c *failingPaymentsClient) UpdateTransactionStatus(_ context.Context, transactionID string, status string, reason *string) error {
@@ -1018,27 +1042,28 @@ func TestRefundFlow_RetryPathFinalStatusUpdateFails(t *testing.T) {
 		t.Fatal("expected error on first attempt when payments client fails")
 	}
 
-	// The saga should have been transitioned to completed already (saga update
-	// succeeded, but the transaction status update failed, causing a returned error
-	// that triggers retry at the consumer level).
+	// The saga should still be running so a retry can repair the finalization.
 	mid, _ := repo.GetSagaByID(ctx, s.ID)
-	if mid.Status != StatusCompleted {
-		t.Errorf("saga status = %s, want completed (saga transitions before payment update)", mid.Status)
+	if mid.Status != StatusRunning {
+		t.Errorf("saga status = %s, want running", mid.Status)
 	}
 
-	// Second attempt (retry): the saga is terminal so it should be handled idempotently.
+	// Second attempt (retry): payments update succeeds and the saga can complete.
 	err = handler.HandleOutcome(ctx, env)
 	if err != nil {
-		t.Fatalf("expected nil on retry (saga terminal), got: %v", err)
+		t.Fatalf("expected nil on retry, got: %v", err)
 	}
 
-	// Verify saga remains completed.
+	// Verify the retry repaired the partial progress and completed the saga.
 	final, _ := repo.GetSagaByID(ctx, s.ID)
 	if final.Status != StatusCompleted {
 		t.Errorf("saga status = %s, want completed", final.Status)
 	}
 	if final.Outcome == nil || *final.Outcome != OutcomeSucceeded {
 		t.Errorf("saga outcome = %v, want succeeded", final.Outcome)
+	}
+	if len(payments.Updates()) != 1 {
+		t.Fatalf("payments updates = %d, want 1", len(payments.Updates()))
 	}
 }
 

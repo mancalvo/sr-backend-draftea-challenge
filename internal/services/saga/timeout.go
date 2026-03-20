@@ -88,19 +88,17 @@ func (p *TimeoutPoller) poll(ctx context.Context) {
 			slog.String("saga_status", string(s.Status)),
 		)
 
-		// Transition to timed_out.
-		_, err := p.repo.UpdateSagaStatus(ctx, s.ID, StatusTimedOut, nil, s.CurrentStep)
-		if err != nil {
-			logger.Error("failed to transition saga to timed_out", "error", err)
-			continue
-		}
-
-		// Also update the transaction status to timed_out.
 		reason := "saga timeout exceeded"
 		if err := p.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "timed_out", &reason); err != nil {
 			logger.Error("failed to update transaction to timed_out", "error", err)
-			// The saga has been marked as timed_out in the DB. The transaction
-			// status update can be retried later or resolved via reconciliation.
+			continue
+		}
+
+		// Transition to timed_out after the ledger update succeeds so retries can
+		// safely repair partial progress.
+		_, err := p.repo.UpdateSagaStatus(ctx, s.ID, StatusTimedOut, nil, s.CurrentStep)
+		if err != nil {
+			logger.Error("failed to transition saga to timed_out", "error", err)
 		}
 
 		logger.Warn("saga timed out")

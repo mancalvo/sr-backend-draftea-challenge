@@ -170,6 +170,19 @@ func (c *paymentsHTTPClient) RegisterTransaction(_ context.Context, req saga.Reg
 	return &saga.RegisterTransactionResponse{ID: req.ID, Status: "pending"}, nil
 }
 
+func (c *paymentsHTTPClient) GetTransaction(_ context.Context, transactionID string) (*saga.TransactionDetails, error) {
+	offeringID := "offering-1"
+	return &saga.TransactionDetails{
+		ID:         transactionID,
+		UserID:     "user-1",
+		Type:       "purchase",
+		Status:     "completed",
+		Amount:     5000,
+		Currency:   "ARS",
+		OfferingID: &offeringID,
+	}, nil
+}
+
 func (c *paymentsHTTPClient) UpdateTransactionStatus(_ context.Context, _ string, _ string, _ *string) error {
 	return nil
 }
@@ -183,7 +196,12 @@ type catalogHTTPClient struct {
 }
 
 func (c *catalogHTTPClient) PurchasePrecheck(_ context.Context, _, _ string) (*saga.PrecheckResult, error) {
-	return &saga.PrecheckResult{Allowed: c.purchaseAllowed, Reason: c.purchaseReason}, nil
+	return &saga.PrecheckResult{
+		Allowed:  c.purchaseAllowed,
+		Reason:   c.purchaseReason,
+		Price:    5000,
+		Currency: "ARS",
+	}, nil
 }
 
 func (c *catalogHTTPClient) RefundPrecheck(_ context.Context, _, _, _ string) (*saga.PrecheckResult, error) {
@@ -305,8 +323,6 @@ func TestIntegration_PurchaseHappyPath(t *testing.T) {
 	rec := h.postJSON(t, "/purchases", saga.PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: "int-pur-happy-1",
 	})
 	if rec.Code != http.StatusAccepted {
@@ -383,8 +399,6 @@ func TestIntegration_PurchaseInsufficientFunds(t *testing.T) {
 	rec := h.postJSON(t, "/purchases", saga.PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: "int-pur-insuf-1",
 	})
 	if rec.Code != http.StatusAccepted {
@@ -471,8 +485,6 @@ func TestIntegration_ConcurrentPurchaseSafety(t *testing.T) {
 			results[idx] = h.postJSON(t, "/purchases", saga.PurchaseCommand{
 				UserID:         "user-1",
 				OfferingID:     "offering-1",
-				Amount:         5000,
-				Currency:       "ARS",
 				IdempotencyKey: fmt.Sprintf("int-pur-concurrent-%d", idx),
 			})
 		}(i)
@@ -671,8 +683,6 @@ func TestIntegration_RefundHappyPath(t *testing.T) {
 	rec := h.postJSON(t, "/purchases", saga.PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: "int-ref-purchase-1",
 	})
 	if rec.Code != http.StatusAccepted {
@@ -703,8 +713,6 @@ func TestIntegration_RefundHappyPath(t *testing.T) {
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
 		TransactionID:  purchaseTxnID,
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: "int-ref-refund-1",
 	})
 	if rec.Code != http.StatusAccepted {

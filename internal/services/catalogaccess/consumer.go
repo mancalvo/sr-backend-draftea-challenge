@@ -48,6 +48,26 @@ func (c *ConsumerHandler) HandleAccessGrantRequested(ctx context.Context, env me
 
 	_, err := c.repo.GrantAccess(ctx, cmd.UserID, cmd.OfferingID, cmd.TransactionID)
 	if errors.Is(err, ErrDuplicateAccess) {
+		existing, lookupErr := c.repo.GetActiveAccess(ctx, cmd.UserID, cmd.OfferingID)
+		if lookupErr != nil {
+			logger.Error("failed to load existing access after duplicate grant", "error", lookupErr)
+			return fmt.Errorf("lookup existing access after duplicate grant: %w", lookupErr)
+		}
+
+		if existing.TransactionID == cmd.TransactionID {
+			logger.Info("access grant already applied, replaying access.granted")
+			return c.publisher.Publish(ctx,
+				messaging.ExchangeOutcomes,
+				messaging.RoutingKeyAccessGranted,
+				env.CorrelationID,
+				messaging.AccessGranted{
+					TransactionID: cmd.TransactionID,
+					UserID:        cmd.UserID,
+					OfferingID:    cmd.OfferingID,
+				},
+			)
+		}
+
 		logger.Warn("access grant conflicted: user already has active access")
 		return c.publisher.Publish(ctx,
 			messaging.ExchangeOutcomes,
@@ -100,6 +120,25 @@ func (c *ConsumerHandler) HandleAccessRevokeRequested(ctx context.Context, env m
 
 	_, err := c.repo.RevokeAccess(ctx, cmd.TransactionID)
 	if errors.Is(err, ErrNoActiveAccess) {
+		existing, lookupErr := c.repo.GetAccessByTransaction(ctx, cmd.TransactionID)
+		if lookupErr == nil && existing.Status == AccessStatusRevoked {
+			logger.Info("access revoke already applied, replaying access.revoked")
+			return c.publisher.Publish(ctx,
+				messaging.ExchangeOutcomes,
+				messaging.RoutingKeyAccessRevoked,
+				env.CorrelationID,
+				messaging.AccessRevoked{
+					TransactionID: cmd.TransactionID,
+					UserID:        cmd.UserID,
+					OfferingID:    cmd.OfferingID,
+				},
+			)
+		}
+		if lookupErr != nil && !errors.Is(lookupErr, ErrNotFound) {
+			logger.Error("failed to load existing access after revoke miss", "error", lookupErr)
+			return fmt.Errorf("lookup existing access after revoke miss: %w", lookupErr)
+		}
+
 		logger.Warn("access revoke rejected: no active access found")
 		return c.publisher.Publish(ctx,
 			messaging.ExchangeOutcomes,

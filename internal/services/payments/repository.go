@@ -204,17 +204,37 @@ func (r *PostgresRepository) UpdateTransactionStatus(ctx context.Context, id str
 	defer tx.Rollback()
 
 	// Read current status with row lock.
-	const selectQ = `SELECT status FROM payments.transactions WHERE id = $1 FOR UPDATE`
-	var currentStatus TransactionStatus
-	if err := tx.QueryRowContext(ctx, selectQ, id).Scan(&currentStatus); err != nil {
+	const selectQ = `SELECT id, user_id, type, status, amount, currency, offering_id, status_reason, created_at, updated_at
+		FROM payments.transactions WHERE id = $1 FOR UPDATE`
+	var current Transaction
+	var offeringID sql.NullString
+	var statusReason sql.NullString
+	if err := tx.QueryRowContext(ctx, selectQ, id).Scan(
+		&current.ID, &current.UserID, &current.Type, &current.Status,
+		&current.Amount, &current.Currency, &offeringID, &statusReason,
+		&current.CreatedAt, &current.UpdatedAt,
+	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("read current status: %w", err)
 	}
+	if offeringID.Valid {
+		current.OfferingID = &offeringID.String
+	}
+	if statusReason.Valid {
+		current.StatusReason = &statusReason.String
+	}
+
+	if current.Status == status && sameOptionalString(current.StatusReason, reason) {
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit tx: %w", err)
+		}
+		return &current, nil
+	}
 
 	// Validate the transition.
-	if err := ValidateTransition(currentStatus, status); err != nil {
+	if err := ValidateTransition(current.Status, status); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrIllegalTransition, err)
 	}
 
@@ -226,20 +246,20 @@ func (r *PostgresRepository) UpdateTransactionStatus(ctx context.Context, id str
 	row := tx.QueryRowContext(ctx, updateQ, status, reason, id)
 
 	var t Transaction
-	var offeringID sql.NullString
-	var statusReason sql.NullString
+	var updatedOfferingID sql.NullString
+	var updatedStatusReason sql.NullString
 	if err := row.Scan(
 		&t.ID, &t.UserID, &t.Type, &t.Status,
-		&t.Amount, &t.Currency, &offeringID, &statusReason,
+		&t.Amount, &t.Currency, &updatedOfferingID, &updatedStatusReason,
 		&t.CreatedAt, &t.UpdatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("scan updated transaction: %w", err)
 	}
-	if offeringID.Valid {
-		t.OfferingID = &offeringID.String
+	if updatedOfferingID.Valid {
+		t.OfferingID = &updatedOfferingID.String
 	}
-	if statusReason.Valid {
-		t.StatusReason = &statusReason.String
+	if updatedStatusReason.Valid {
+		t.StatusReason = &updatedStatusReason.String
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -431,6 +451,11 @@ func (m *MemoryRepository) UpdateTransactionStatus(_ context.Context, id string,
 		return nil, ErrNotFound
 	}
 
+	if txn.Status == status && sameOptionalString(txn.StatusReason, reason) {
+		result := *txn
+		return &result, nil
+	}
+
 	if err := ValidateTransition(txn.Status, status); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrIllegalTransition, err)
 	}
@@ -441,4 +466,11 @@ func (m *MemoryRepository) UpdateTransactionStatus(_ context.Context, id string,
 
 	result := *txn
 	return &result, nil
+}
+
+func sameOptionalString(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }

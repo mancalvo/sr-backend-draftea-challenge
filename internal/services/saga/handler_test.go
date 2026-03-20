@@ -32,20 +32,46 @@ type mockCatalogClient struct {
 }
 
 func (m *mockCatalogClient) PurchasePrecheck(_ context.Context, _, _ string) (*PrecheckResult, error) {
-	return m.purchaseResult, m.purchaseErr
+	if m.purchaseErr != nil {
+		return nil, m.purchaseErr
+	}
+	if m.purchaseResult == nil {
+		return &PrecheckResult{Allowed: true, Price: 5000, Currency: "ARS"}, nil
+	}
+	result := *m.purchaseResult
+	if result.Allowed {
+		if result.Price == 0 {
+			result.Price = 5000
+		}
+		if result.Currency == "" {
+			result.Currency = "ARS"
+		}
+	}
+	return &result, nil
 }
 
 func (m *mockCatalogClient) RefundPrecheck(_ context.Context, _, _, _ string) (*PrecheckResult, error) {
-	return m.refundResult, m.refundErr
+	if m.refundErr != nil {
+		return nil, m.refundErr
+	}
+	if m.refundResult == nil {
+		return &PrecheckResult{Allowed: true}, nil
+	}
+	result := *m.refundResult
+	return &result, nil
 }
 
 type mockPaymentsClient struct {
 	registerResult *RegisterTransactionResponse
 	registerErr    error
+	getResult      *TransactionDetails
+	getErr         error
 	updateErr      error
+	registerCalls  []RegisterTransactionRequest
 }
 
 func (m *mockPaymentsClient) RegisterTransaction(_ context.Context, req RegisterTransactionRequest) (*RegisterTransactionResponse, error) {
+	m.registerCalls = append(m.registerCalls, req)
 	if m.registerErr != nil {
 		return nil, m.registerErr
 	}
@@ -55,6 +81,29 @@ func (m *mockPaymentsClient) RegisterTransaction(_ context.Context, req Register
 	return &RegisterTransactionResponse{
 		ID:     req.ID,
 		Status: "pending",
+	}, nil
+}
+
+func (m *mockPaymentsClient) GetTransaction(_ context.Context, transactionID string) (*TransactionDetails, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	if m.getResult != nil {
+		result := *m.getResult
+		if result.ID == "" {
+			result.ID = transactionID
+		}
+		return &result, nil
+	}
+	offeringID := "offering-1"
+	return &TransactionDetails{
+		ID:         transactionID,
+		UserID:     "user-1",
+		Type:       "purchase",
+		Status:     "completed",
+		Amount:     5000,
+		Currency:   "ARS",
+		OfferingID: &offeringID,
 	}, nil
 }
 
@@ -235,8 +284,6 @@ func TestHandlePurchase_Success(t *testing.T) {
 	body, _ := json.Marshal(PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: "pur-key-1",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
@@ -260,8 +307,6 @@ func TestHandlePurchase_PrecheckDenied_FailFast(t *testing.T) {
 	body, _ := json.Marshal(PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: "pur-key-2",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
@@ -291,7 +336,6 @@ func TestHandlePurchase_CatalogUnavailable_FailFast(t *testing.T) {
 	body, _ := json.Marshal(PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
 		IdempotencyKey: "pur-key-3",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
@@ -318,7 +362,6 @@ func TestHandlePurchase_PaymentsUnavailable_FailFast(t *testing.T) {
 	body, _ := json.Marshal(PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
 		IdempotencyKey: "pur-key-4",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
@@ -342,8 +385,6 @@ func TestHandlePurchase_IdempotentAcceptance(t *testing.T) {
 	body, _ := json.Marshal(PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: "pur-key-idem",
 	})
 
@@ -366,8 +407,6 @@ func TestHandlePurchase_IdempotentAcceptance(t *testing.T) {
 	body, _ = json.Marshal(PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: "pur-key-idem",
 	})
 	req = httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
@@ -403,8 +442,6 @@ func TestHandleRefund_Success(t *testing.T) {
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
 		TransactionID:  "orig-txn-1",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: "ref-key-1",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/refunds", bytes.NewReader(body))
@@ -429,7 +466,6 @@ func TestHandleRefund_PrecheckDenied(t *testing.T) {
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
 		TransactionID:  "orig-txn-1",
-		Amount:         5000,
 		IdempotencyKey: "ref-key-2",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/refunds", bytes.NewReader(body))
@@ -454,7 +490,6 @@ func TestHandleRefund_CatalogUnavailable_FailFast(t *testing.T) {
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
 		TransactionID:  "orig-txn-1",
-		Amount:         5000,
 		IdempotencyKey: "ref-key-3",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/refunds", bytes.NewReader(body))
@@ -475,7 +510,7 @@ func TestHandleRefund_MissingFields(t *testing.T) {
 	body, _ := json.Marshal(RefundCommand{
 		UserID:     "user-1",
 		OfferingID: "offering-1",
-		// Missing TransactionID, Amount, IdempotencyKey
+		// Missing TransactionID and IdempotencyKey
 	})
 	req := httptest.NewRequest(http.MethodPost, "/refunds", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -511,8 +546,6 @@ func TestHandleRefund_InitiatesWorkflow(t *testing.T) {
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
 		TransactionID:  "orig-purchase-txn",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: "ref-init-1",
 	})
 
@@ -731,8 +764,6 @@ func TestPurchaseCreatedSagaHasCorrectPayload(t *testing.T) {
 	body, _ := json.Marshal(PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: "pur-payload",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
@@ -827,8 +858,6 @@ func TestHandlePurchase_IdempotencyMismatch_ReturnsConflict(t *testing.T) {
 	body, _ := json.Marshal(PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: "pur-mismatch-1",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
@@ -840,12 +869,10 @@ func TestHandlePurchase_IdempotencyMismatch_ReturnsConflict(t *testing.T) {
 		t.Fatalf("first: status = %d, want %d", rec.Code, http.StatusAccepted)
 	}
 
-	// Second request: same key, different amount.
+	// Second request: same key, different offering.
 	body, _ = json.Marshal(PurchaseCommand{
 		UserID:         "user-1",
-		OfferingID:     "offering-1",
-		Amount:         999,
-		Currency:       "ARS",
+		OfferingID:     "offering-2",
 		IdempotencyKey: "pur-mismatch-1",
 	})
 	req = httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
@@ -855,6 +882,163 @@ func TestHandlePurchase_IdempotencyMismatch_ReturnsConflict(t *testing.T) {
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("mismatch: status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
+func TestHandlePurchase_RejectsClientMoneyFields(t *testing.T) {
+	repo := NewMemoryRepository()
+	catalog := &mockCatalogClient{
+		purchaseResult: &PrecheckResult{Allowed: true},
+	}
+	handler := newTestHandler(repo, catalog, &mockPaymentsClient{})
+	router := newTestRouter(handler)
+
+	body := []byte(`{"user_id":"user-1","offering_id":"offering-1","amount":999,"currency":"USD","idempotency_key":"pur-client-money"}`)
+	req := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandlePurchase_UsesAuthoritativeCatalogPricing(t *testing.T) {
+	repo := NewMemoryRepository()
+	catalog := &mockCatalogClient{
+		purchaseResult: &PrecheckResult{Allowed: true, Price: 7200, Currency: "USD"},
+	}
+	payments := &mockPaymentsClient{}
+	pub := &recordingPublisher{}
+	handler := NewHandler(repo, catalog, payments, pub, 30*time.Second, testLogger())
+	router := newTestRouter(handler)
+
+	body, _ := json.Marshal(PurchaseCommand{
+		UserID:         "user-1",
+		OfferingID:     "offering-1",
+		IdempotencyKey: "pur-mismatch-1",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if len(payments.registerCalls) != 1 {
+		t.Fatalf("register calls = %d, want 1", len(payments.registerCalls))
+	}
+	if payments.registerCalls[0].Amount != 7200 {
+		t.Errorf("registered amount = %d, want 7200", payments.registerCalls[0].Amount)
+	}
+	if payments.registerCalls[0].Currency != "USD" {
+		t.Errorf("registered currency = %s, want USD", payments.registerCalls[0].Currency)
+	}
+
+	msgs := pub.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("published messages = %d, want 1", len(msgs))
+	}
+	payload, ok := msgs[0].Payload.(messaging.WalletDebitRequested)
+	if !ok {
+		t.Fatalf("payload type = %T, want WalletDebitRequested", msgs[0].Payload)
+	}
+	if payload.Amount != 7200 {
+		t.Errorf("wallet debit amount = %d, want 7200", payload.Amount)
+	}
+	if payload.Currency != "USD" {
+		t.Errorf("wallet debit currency = %s, want USD", payload.Currency)
+	}
+}
+
+func TestHandleRefund_RejectsClientMoneyFields(t *testing.T) {
+	repo := NewMemoryRepository()
+	catalog := &mockCatalogClient{
+		refundResult: &PrecheckResult{Allowed: true},
+	}
+	handler := newTestHandler(repo, catalog, &mockPaymentsClient{})
+	router := newTestRouter(handler)
+
+	body := []byte(`{"user_id":"user-1","offering_id":"offering-1","transaction_id":"orig-txn-1","amount":999,"currency":"USD","idempotency_key":"ref-client-money"}`)
+	req := httptest.NewRequest(http.MethodPost, "/refunds", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandleRefund_UsesOriginalTransactionMoney(t *testing.T) {
+	repo := NewMemoryRepository()
+	catalog := &mockCatalogClient{
+		refundResult: &PrecheckResult{Allowed: true},
+	}
+	offeringID := "offering-1"
+	payments := &mockPaymentsClient{
+		getResult: &TransactionDetails{
+			UserID:     "user-1",
+			Type:       "purchase",
+			Status:     "completed",
+			Amount:     8600,
+			Currency:   "USD",
+			OfferingID: &offeringID,
+		},
+	}
+	pub := &recordingPublisher{}
+	handler := NewHandler(repo, catalog, payments, pub, 30*time.Second, testLogger())
+	router := newTestRouter(handler)
+
+	body, _ := json.Marshal(RefundCommand{
+		UserID:         "user-1",
+		OfferingID:     "offering-1",
+		TransactionID:  "orig-txn-1",
+		IdempotencyKey: "ref-authoritative-money",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/refunds", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if len(payments.registerCalls) != 1 {
+		t.Fatalf("register calls = %d, want 1", len(payments.registerCalls))
+	}
+	if payments.registerCalls[0].Amount != 8600 {
+		t.Errorf("registered amount = %d, want 8600", payments.registerCalls[0].Amount)
+	}
+	if payments.registerCalls[0].Currency != "USD" {
+		t.Errorf("registered currency = %s, want USD", payments.registerCalls[0].Currency)
+	}
+
+	sagaResp := struct {
+		Data struct {
+			TransactionID string `json:"transaction_id"`
+		} `json:"data"`
+	}{}
+	if err := json.NewDecoder(rec.Body).Decode(&sagaResp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	s, err := repo.GetSagaByTransactionID(context.Background(), sagaResp.Data.TransactionID)
+	if err != nil {
+		t.Fatalf("get saga: %v", err)
+	}
+
+	var payload RefundPayload
+	if err := json.Unmarshal(s.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal refund payload: %v", err)
+	}
+	if payload.Amount != 8600 {
+		t.Errorf("refund payload amount = %d, want 8600", payload.Amount)
+	}
+	if payload.Currency != "USD" {
+		t.Errorf("refund payload currency = %s, want USD", payload.Currency)
 	}
 }
 
@@ -891,8 +1075,6 @@ func TestIdempotencyKey_SameKeyDifferentScopes(t *testing.T) {
 	body, _ = json.Marshal(PurchaseCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
-		Currency:       "ARS",
 		IdempotencyKey: sharedKey,
 	})
 	req = httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
@@ -1031,7 +1213,6 @@ func TestHandlePurchase_MissingOfferingID_Returns422(t *testing.T) {
 
 	body, _ := json.Marshal(PurchaseCommand{
 		UserID:         "user-1",
-		Amount:         5000,
 		IdempotencyKey: "pur-val-1",
 		// Missing offering_id
 	})
@@ -1065,7 +1246,6 @@ func TestHandleRefund_MissingTransactionID_Returns422(t *testing.T) {
 	body, _ := json.Marshal(RefundCommand{
 		UserID:         "user-1",
 		OfferingID:     "offering-1",
-		Amount:         5000,
 		IdempotencyKey: "ref-val-1",
 		// Missing transaction_id
 	})

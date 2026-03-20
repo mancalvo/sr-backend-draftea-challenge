@@ -2,6 +2,7 @@ package payments
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -13,7 +14,7 @@ type ChargeResult struct {
 }
 
 // Provider defines the abstraction for an external payment provider.
-// Implementations may call real external APIs or simulate behavior for testing.
+// Implementations must treat transactionID as an idempotency key.
 type Provider interface {
 	// Charge initiates a charge against the external provider.
 	// Returns a ChargeResult indicating success or failure.
@@ -24,19 +25,40 @@ type Provider interface {
 // Suitable for development and testing without a real external provider.
 type SimulatedProvider struct {
 	Delay time.Duration
+	mu    sync.Mutex
+	cache map[string]*ChargeResult
 }
 
 // NewSimulatedProvider creates a SimulatedProvider with the given simulated processing delay.
 func NewSimulatedProvider(delay time.Duration) *SimulatedProvider {
-	return &SimulatedProvider{Delay: delay}
+	return &SimulatedProvider{
+		Delay: delay,
+		cache: make(map[string]*ChargeResult),
+	}
 }
 
 func (p *SimulatedProvider) Charge(ctx context.Context, transactionID, _ string, _ int64, _ string) (*ChargeResult, error) {
+	p.mu.Lock()
+	if cached, ok := p.cache[transactionID]; ok {
+		result := *cached
+		p.mu.Unlock()
+		return &result, nil
+	}
+	p.mu.Unlock()
+
 	select {
 	case <-time.After(p.Delay):
-		return &ChargeResult{
+		result := &ChargeResult{
 			Success:     true,
 			ProviderRef: "sim-" + transactionID,
+		}
+		p.mu.Lock()
+		p.cache[transactionID] = result
+		p.mu.Unlock()
+		return &ChargeResult{
+			Success:     result.Success,
+			ProviderRef: result.ProviderRef,
+			Reason:      result.Reason,
 		}, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
