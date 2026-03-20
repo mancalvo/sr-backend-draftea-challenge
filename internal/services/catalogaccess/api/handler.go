@@ -20,6 +20,12 @@ type Handler struct {
 	logger  *slog.Logger
 }
 
+const (
+	errCodeMissingUserID              = "MISSING_USER_ID"
+	errCodeInvalidPurchasePrecheckReq = "INVALID_PURCHASE_PRECHECK_REQUEST"
+	errCodeInvalidRefundPrecheckReq   = "INVALID_REFUND_PRECHECK_REQUEST"
+)
+
 // NewHandler creates a new Handler.
 func NewHandler(service *service.Service, logger *slog.Logger) *Handler {
 	return &Handler{service: service, logger: logger}
@@ -30,7 +36,7 @@ func NewHandler(service *service.Service, logger *slog.Logger) *Handler {
 func (h *Handler) GetEntitlements(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "user_id")
 	if userID == "" {
-		httpx.Error(w, http.StatusBadRequest, "user_id is required")
+		httpx.ErrorWithCode(w, http.StatusBadRequest, "user_id is required", errCodeMissingUserID)
 		return
 	}
 
@@ -73,7 +79,7 @@ func (h *Handler) PurchasePrecheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.UserID == "" || req.OfferingID == "" {
-		httpx.Error(w, http.StatusBadRequest, "user_id and offering_id are required")
+		httpx.ErrorWithCode(w, http.StatusBadRequest, "user_id and offering_id are required", errCodeInvalidPurchasePrecheckReq)
 		return
 	}
 
@@ -103,7 +109,7 @@ func (h *Handler) RefundPrecheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.UserID == "" || req.OfferingID == "" || req.TransactionID == "" {
-		httpx.Error(w, http.StatusBadRequest, "user_id, offering_id, and transaction_id are required")
+		httpx.ErrorWithCode(w, http.StatusBadRequest, "user_id, offering_id, and transaction_id are required", errCodeInvalidRefundPrecheckReq)
 		return
 	}
 

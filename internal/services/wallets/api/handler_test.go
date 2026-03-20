@@ -111,6 +111,27 @@ func TestGetBalance_WalletNotFound(t *testing.T) {
 	}
 }
 
+func TestGetBalance_MissingUserID(t *testing.T) {
+	repo := NewMemoryRepository()
+	h := NewHandler(walletsservice.New(repo), testLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/wallets//balance", nil)
+	rec := httptest.NewRecorder()
+	h.GetBalance(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	var resp httpx.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != errCodeMissingUserID {
+		t.Fatalf("error code = %+v, want %s", resp.Error, errCodeMissingUserID)
+	}
+}
+
 func TestGetBalance_AfterDebit(t *testing.T) {
 	repo := seedRepo(10000)
 	h := NewHandler(walletsservice.New(repo), testLogger())

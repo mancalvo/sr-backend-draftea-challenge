@@ -21,6 +21,15 @@ type Handler struct {
 	logger  *slog.Logger
 }
 
+const (
+	errCodeInvalidTransactionRequest  = "INVALID_TRANSACTION_REQUEST"
+	errCodeInvalidTransactionType     = "INVALID_TRANSACTION_TYPE"
+	errCodeMissingOriginalTransaction = "MISSING_ORIGINAL_TRANSACTION_ID"
+	errCodeMissingTransactionID       = "MISSING_TRANSACTION_ID"
+	errCodeInvalidStatus              = "INVALID_STATUS"
+	errCodeMissingUserID              = "MISSING_USER_ID"
+)
+
 // NewHandler creates a new Handler.
 func NewHandler(service *service.Service, logger *slog.Logger) *Handler {
 	return &Handler{service: service, logger: logger}
@@ -37,15 +46,15 @@ func (h *Handler) CreateTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.ID == "" || req.UserID == "" || req.Amount <= 0 {
-		httpx.Error(w, http.StatusBadRequest, "id, user_id, and a positive amount are required")
+		httpx.ErrorWithCode(w, http.StatusBadRequest, "id, user_id, and a positive amount are required", errCodeInvalidTransactionRequest)
 		return
 	}
 	if !domain.ValidTransactionType(req.Type) {
-		httpx.Error(w, http.StatusBadRequest, "invalid transaction type")
+		httpx.ErrorWithCode(w, http.StatusBadRequest, "invalid transaction type", errCodeInvalidTransactionType)
 		return
 	}
 	if req.Type == domain.TransactionTypeRefund && (req.OriginalTransactionID == nil || *req.OriginalTransactionID == "") {
-		httpx.Error(w, http.StatusBadRequest, "original_transaction_id is required for refunds")
+		httpx.ErrorWithCode(w, http.StatusBadRequest, "original_transaction_id is required for refunds", errCodeMissingOriginalTransaction)
 		return
 	}
 	if req.Currency == "" {
@@ -89,7 +98,7 @@ func (h *Handler) CreateTransaction(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) UpdateTransactionStatus(w http.ResponseWriter, r *http.Request) {
 	txnID := chi.URLParam(r, "transaction_id")
 	if txnID == "" {
-		httpx.Error(w, http.StatusBadRequest, "transaction_id is required")
+		httpx.ErrorWithCode(w, http.StatusBadRequest, "transaction_id is required", errCodeMissingTransactionID)
 		return
 	}
 
@@ -100,7 +109,7 @@ func (h *Handler) UpdateTransactionStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	if !domain.ValidTransactionStatus(req.Status) {
-		httpx.Error(w, http.StatusBadRequest, "invalid status")
+		httpx.ErrorWithCode(w, http.StatusBadRequest, "invalid status", errCodeInvalidStatus)
 		return
 	}
 
@@ -133,7 +142,7 @@ func (h *Handler) UpdateTransactionStatus(w http.ResponseWriter, r *http.Request
 func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
 	txnID := chi.URLParam(r, "transaction_id")
 	if txnID == "" {
-		httpx.Error(w, http.StatusBadRequest, "transaction_id is required")
+		httpx.ErrorWithCode(w, http.StatusBadRequest, "transaction_id is required", errCodeMissingTransactionID)
 		return
 	}
 
@@ -156,7 +165,7 @@ func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListTransactions(w http.ResponseWriter, r *http.Request) {
 	userID := r.URL.Query().Get("user_id")
 	if userID == "" {
-		httpx.Error(w, http.StatusBadRequest, "user_id query parameter is required")
+		httpx.ErrorWithCode(w, http.StatusBadRequest, "user_id query parameter is required", errCodeMissingUserID)
 		return
 	}
 

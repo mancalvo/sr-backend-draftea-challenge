@@ -212,3 +212,65 @@ func TestMemoryRepo_GetActiveAccessByTransaction_NotFound(t *testing.T) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
+
+func TestMemoryRepo_ReturnsDefensiveCopies(t *testing.T) {
+	repo := seedRepo(true)
+	ctx := context.Background()
+
+	user, err := repo.GetUserByID(ctx, "user-1")
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	user.Name = "Mutated User"
+
+	offering, err := repo.GetOfferingByID(ctx, "offering-1")
+	if err != nil {
+		t.Fatalf("GetOfferingByID: %v", err)
+	}
+	offering.Name = "Mutated Offering"
+
+	access, err := repo.GetActiveAccessByTransaction(ctx, "txn-original")
+	if err != nil {
+		t.Fatalf("GetActiveAccessByTransaction: %v", err)
+	}
+	access.Status = AccessStatusRevoked
+
+	if repo.Users["user-1"].Name != "Test User" {
+		t.Fatalf("stored user name = %q, want %q", repo.Users["user-1"].Name, "Test User")
+	}
+	if repo.Offerings["offering-1"].Name != "Premium Plan" {
+		t.Fatalf("stored offering name = %q, want %q", repo.Offerings["offering-1"].Name, "Premium Plan")
+	}
+	if repo.AccessRecords[0].Status != AccessStatusActive {
+		t.Fatalf("stored access status = %q, want %q", repo.AccessRecords[0].Status, AccessStatusActive)
+	}
+}
+
+func TestMemoryRepo_GrantAndRevokeReturnCopies(t *testing.T) {
+	repo := seedRepo(false)
+	ctx := context.Background()
+
+	granted, err := repo.GrantAccess(ctx, "user-1", "offering-1", "txn-1")
+	if err != nil {
+		t.Fatalf("GrantAccess: %v", err)
+	}
+	granted.Status = AccessStatusRevoked
+
+	if repo.AccessRecords[0].Status != AccessStatusActive {
+		t.Fatalf("stored granted status = %q, want %q", repo.AccessRecords[0].Status, AccessStatusActive)
+	}
+
+	revoked, err := repo.RevokeAccess(ctx, "txn-1")
+	if err != nil {
+		t.Fatalf("RevokeAccess: %v", err)
+	}
+	revoked.Status = AccessStatusActive
+	revoked.RevokedAt = nil
+
+	if repo.AccessRecords[0].Status != AccessStatusRevoked {
+		t.Fatalf("stored revoked status = %q, want %q", repo.AccessRecords[0].Status, AccessStatusRevoked)
+	}
+	if repo.AccessRecords[0].RevokedAt == nil {
+		t.Fatal("stored revoked_at should remain set")
+	}
+}

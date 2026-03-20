@@ -160,6 +160,14 @@ func TestCreateTransaction_RefundRequiresOriginalTransactionID(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
+
+	var resp httpx.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != errCodeMissingOriginalTransaction {
+		t.Fatalf("error code = %+v, want %s", resp.Error, errCodeMissingOriginalTransaction)
+	}
 }
 
 func TestCreateTransaction_RefundPersistsOriginalTransactionID(t *testing.T) {
@@ -252,6 +260,14 @@ func TestCreateTransaction_MissingFields(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
+
+	var resp httpx.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != errCodeInvalidTransactionRequest {
+		t.Fatalf("error code = %+v, want %s", resp.Error, errCodeInvalidTransactionRequest)
+	}
 }
 
 func TestCreateTransaction_InvalidType(t *testing.T) {
@@ -273,6 +289,14 @@ func TestCreateTransaction_InvalidType(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	var resp httpx.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != errCodeInvalidTransactionType {
+		t.Fatalf("error code = %+v, want %s", resp.Error, errCodeInvalidTransactionType)
 	}
 }
 
@@ -391,6 +415,14 @@ func TestUpdateTransactionStatus_InvalidStatus(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	var resp httpx.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != errCodeInvalidStatus {
+		t.Fatalf("error code = %+v, want %s", resp.Error, errCodeInvalidStatus)
 	}
 }
 
@@ -554,6 +586,14 @@ func TestListTransactions_MissingUserID(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	var resp httpx.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != errCodeMissingUserID {
+		t.Fatalf("error code = %+v, want %s", resp.Error, errCodeMissingUserID)
 	}
 }
 

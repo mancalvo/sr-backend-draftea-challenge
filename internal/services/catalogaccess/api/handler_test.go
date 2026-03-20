@@ -108,6 +108,27 @@ func TestGetEntitlements_UserNotFound(t *testing.T) {
 	}
 }
 
+func TestGetEntitlements_MissingUserID(t *testing.T) {
+	repo := seedRepo(false)
+	h := NewHandler(catalogservice.New(repo), testLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/users//entitlements", nil)
+	rec := httptest.NewRecorder()
+	h.GetEntitlements(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	var resp httpx.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != errCodeMissingUserID {
+		t.Fatalf("error code = %+v, want %s", resp.Error, errCodeMissingUserID)
+	}
+}
+
 func TestGetEntitlements_EmptyList(t *testing.T) {
 	repo := seedRepo(false)
 	h := NewHandler(catalogservice.New(repo), testLogger())
@@ -330,6 +351,14 @@ func TestPurchasePrecheck_MissingFields(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
+
+	var resp httpx.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != errCodeInvalidPurchasePrecheckReq {
+		t.Fatalf("error code = %+v, want %s", resp.Error, errCodeInvalidPurchasePrecheckReq)
+	}
 }
 
 // --- POST /internal/refund-precheck ---
@@ -429,5 +458,13 @@ func TestRefundPrecheck_MissingFields(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	var resp httpx.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != errCodeInvalidRefundPrecheckReq {
+		t.Fatalf("error code = %+v, want %s", resp.Error, errCodeInvalidRefundPrecheckReq)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	platformdatabase "github.com/draftea/sr-backend-draftea-challenge/internal/platform/database"
@@ -203,6 +204,7 @@ func scanAccessRecord(row scanner) (*domain.AccessRecord, error) {
 
 // MemoryRepository is an in-memory implementation of Repository for unit tests.
 type MemoryRepository struct {
+	mu            sync.RWMutex
 	Users         map[string]*domain.User
 	Offerings     map[string]*domain.Offering
 	AccessRecords []*domain.AccessRecord
@@ -218,49 +220,67 @@ func NewMemoryRepository() *MemoryRepository {
 }
 
 func (m *MemoryRepository) GetUserByID(_ context.Context, userID string) (*domain.User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	u, ok := m.Users[userID]
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return u, nil
+	return copyUser(u), nil
 }
 
 func (m *MemoryRepository) GetOfferingByID(_ context.Context, offeringID string) (*domain.Offering, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	o, ok := m.Offerings[offeringID]
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return o, nil
+	return copyOffering(o), nil
 }
 
 func (m *MemoryRepository) GetActiveAccess(_ context.Context, userID, offeringID string) (*domain.AccessRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	for _, ar := range m.AccessRecords {
 		if ar.UserID == userID && ar.OfferingID == offeringID && ar.Status == domain.AccessStatusActive {
-			return ar, nil
+			return copyAccessRecord(ar), nil
 		}
 	}
 	return nil, ErrNotFound
 }
 
 func (m *MemoryRepository) GetActiveAccessByTransaction(_ context.Context, transactionID string) (*domain.AccessRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	for _, ar := range m.AccessRecords {
 		if ar.TransactionID == transactionID && ar.Status == domain.AccessStatusActive {
-			return ar, nil
+			return copyAccessRecord(ar), nil
 		}
 	}
 	return nil, ErrNotFound
 }
 
 func (m *MemoryRepository) GetAccessByTransaction(_ context.Context, transactionID string) (*domain.AccessRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	for _, ar := range m.AccessRecords {
 		if ar.TransactionID == transactionID {
-			return ar, nil
+			return copyAccessRecord(ar), nil
 		}
 	}
 	return nil, ErrNotFound
 }
 
 func (m *MemoryRepository) ListEntitlements(_ context.Context, userID string) ([]domain.Entitlement, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	var result []domain.Entitlement
 	for _, ar := range m.AccessRecords {
 		if ar.UserID == userID && ar.Status == domain.AccessStatusActive {
@@ -280,6 +300,9 @@ func (m *MemoryRepository) ListEntitlements(_ context.Context, userID string) ([
 }
 
 func (m *MemoryRepository) GrantAccess(_ context.Context, userID, offeringID, transactionID string) (*domain.AccessRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	// Enforce unique active access per user+offering.
 	for _, ar := range m.AccessRecords {
 		if ar.UserID == userID && ar.OfferingID == offeringID && ar.Status == domain.AccessStatusActive {
@@ -299,18 +322,49 @@ func (m *MemoryRepository) GrantAccess(_ context.Context, userID, offeringID, tr
 		UpdatedAt:     now,
 	}
 	m.AccessRecords = append(m.AccessRecords, ar)
-	return ar, nil
+	return copyAccessRecord(ar), nil
 }
 
 func (m *MemoryRepository) RevokeAccess(_ context.Context, transactionID string) (*domain.AccessRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	for _, ar := range m.AccessRecords {
 		if ar.TransactionID == transactionID && ar.Status == domain.AccessStatusActive {
 			now := time.Now().UTC()
 			ar.Status = domain.AccessStatusRevoked
 			ar.RevokedAt = &now
 			ar.UpdatedAt = now
-			return ar, nil
+			return copyAccessRecord(ar), nil
 		}
 	}
 	return nil, ErrNoActiveAccess
+}
+
+func copyUser(user *domain.User) *domain.User {
+	if user == nil {
+		return nil
+	}
+	cloned := *user
+	return &cloned
+}
+
+func copyOffering(offering *domain.Offering) *domain.Offering {
+	if offering == nil {
+		return nil
+	}
+	cloned := *offering
+	return &cloned
+}
+
+func copyAccessRecord(access *domain.AccessRecord) *domain.AccessRecord {
+	if access == nil {
+		return nil
+	}
+	cloned := *access
+	if access.RevokedAt != nil {
+		revokedAt := *access.RevokedAt
+		cloned.RevokedAt = &revokedAt
+	}
+	return &cloned
 }

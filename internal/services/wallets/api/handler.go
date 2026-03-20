@@ -26,6 +26,8 @@ type Handler struct {
 	logger  *slog.Logger
 }
 
+const errCodeMissingUserID = "MISSING_USER_ID"
+
 // NewHandler creates a new Handler.
 func NewHandler(service *service.Service, logger *slog.Logger) *Handler {
 	return &Handler{service: service, logger: logger}
@@ -35,7 +37,7 @@ func NewHandler(service *service.Service, logger *slog.Logger) *Handler {
 func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "user_id")
 	if userID == "" {
-		httpx.Error(w, http.StatusBadRequest, "user_id is required")
+		httpx.ErrorWithCode(w, http.StatusBadRequest, "user_id is required", errCodeMissingUserID)
 		return
 	}
 
