@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -81,6 +83,7 @@ func main() {
 		logger.Error("failed to open publisher channel", "error", err)
 		os.Exit(1)
 	}
+	defer pubCh.Close()
 	publisher := rabbitmq.NewPublisher(pubCh, logger)
 
 	// Consumer channel
@@ -89,6 +92,7 @@ func main() {
 		logger.Error("failed to open consumer channel", "error", err)
 		os.Exit(1)
 	}
+	defer consCh.Close()
 	consumer := rabbitmq.NewConsumer(consCh, logger, rabbitmq.DefaultRetryConfig())
 
 	// Sync HTTP clients
@@ -132,9 +136,14 @@ func main() {
 	// Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	var wg sync.WaitGroup
 
 	// Start AMQP consumer in background
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		if err := consumer.Consume(ctx, messaging.QueueSagaOutcomes, amqpHandler.Handle); err != nil && ctx.Err() == nil {
 			logger.Error("consumer stopped unexpectedly", "error", err)
 			cancel()
@@ -142,10 +151,16 @@ func main() {
 	}()
 
 	// Start timeout poller in background
-	go timeoutPoller.Run(ctx)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		timeoutPoller.Run(ctx)
+	}()
 
 	// Start HTTP server in background
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		logger.Info("saga-orchestrator HTTP server starting", "port", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("HTTP server error", "error", err)
@@ -165,9 +180,10 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("HTTP server shutdown error", "error", err)
 	}
+	wg.Wait()
 
 	logger.Info("saga-orchestrator stopped")
 }
