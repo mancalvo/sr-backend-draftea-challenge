@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -100,7 +99,7 @@ func main() {
 
 	// Handlers
 	httpHandler := paymentsapi.NewHandler(paymentsservice.New(repo), logger)
-	amqpHandler := paymentsconsumer.NewHandler(processdeposit.New(provider, publisher, logger))
+	amqpHandler := paymentsconsumer.NewHandler(processdeposit.New(provider, publisher, logger), logger)
 
 	// HTTP server with readiness checks
 	router := paymentsapi.NewRouter(httpHandler, logger,
@@ -124,15 +123,7 @@ func main() {
 
 	// Start AMQP consumer in background
 	go func() {
-		if err := consumer.Consume(ctx, messaging.QueuePaymentsCommands, func(msgCtx context.Context, env messaging.Envelope) error {
-			switch env.Type {
-			case messaging.RoutingKeyDepositRequested:
-				return amqpHandler.HandleDepositRequested(msgCtx, env)
-			default:
-				logger.Warn("unknown message type", slog.String("type", env.Type))
-				return nil
-			}
-		}); err != nil && ctx.Err() == nil {
+		if err := consumer.Consume(ctx, messaging.QueuePaymentsCommands, amqpHandler.Handle); err != nil && ctx.Err() == nil {
 			logger.Error("consumer stopped unexpectedly", "error", err)
 			cancel()
 		}

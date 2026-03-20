@@ -28,6 +28,11 @@ func NewHandler(
 	}
 }
 
+// Handle routes an incoming saga outcome event to the outcome handler.
+func (h *Handler) Handle(ctx context.Context, env messaging.Envelope) error {
+	return h.HandleOutcome(ctx, env)
+}
+
 // HandleOutcome routes an incoming outcome event to the outcome use case.
 func (h *Handler) HandleOutcome(ctx context.Context, env messaging.Envelope) error {
 	return h.handleOutcome.Execute(ctx, env)

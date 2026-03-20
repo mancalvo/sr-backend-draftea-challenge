@@ -30,6 +30,19 @@ func NewHandler(service *service.Service, publisher Publisher, logger *slog.Logg
 	return &Handler{service: service, publisher: publisher, logger: logger}
 }
 
+// Handle routes an incoming catalog-access command to the matching handler.
+func (c *Handler) Handle(ctx context.Context, env messaging.Envelope) error {
+	switch env.Type {
+	case messaging.RoutingKeyAccessGrantRequested:
+		return c.HandleAccessGrantRequested(ctx, env)
+	case messaging.RoutingKeyAccessRevokeRequested:
+		return c.HandleAccessRevokeRequested(ctx, env)
+	default:
+		c.logger.Warn("unknown message type", slog.String("type", env.Type))
+		return nil
+	}
+}
+
 // HandleAccessGrantRequested processes an access.grant.requested command.
 // It grants access to the specified offering for the user, publishing
 // either access.granted or access.grant.conflicted as the outcome.

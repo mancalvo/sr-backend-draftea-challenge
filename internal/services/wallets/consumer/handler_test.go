@@ -96,7 +96,7 @@ func TestHandleWalletDebitRequested_Success(t *testing.T) {
 	}
 	env := makeEnvelope(t, messaging.RoutingKeyWalletDebitRequested, cmd)
 
-	err := ch.HandleWalletDebitRequested(context.Background(), env)
+	err := ch.Handle(context.Background(), env)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,6 +131,20 @@ func TestHandleWalletDebitRequested_Success(t *testing.T) {
 	}
 	if outcome.SourceStep != "purchase_debit" {
 		t.Errorf("source_step = %v, want purchase_debit", outcome.SourceStep)
+	}
+}
+
+func TestHandle_UnknownMessageType_Ignored(t *testing.T) {
+	repo := seedRepo(10000)
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(repo, pub, testLogger())
+
+	env := makeEnvelope(t, "wallets.unknown", map[string]string{"status": "noop"})
+	if err := ch.Handle(context.Background(), env); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pub.calls) != 0 {
+		t.Fatalf("publish calls = %d, want 0", len(pub.calls))
 	}
 }
 

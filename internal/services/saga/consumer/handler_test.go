@@ -332,7 +332,7 @@ func TestPurchaseFlow_HappyPath(t *testing.T) {
 		BalanceAfter:  15000,
 		SourceStep:    "purchase_debit",
 	})
-	if err := handler.HandleOutcome(ctx, env); err != nil {
+	if err := handler.Handle(ctx, env); err != nil {
 		t.Fatalf("handleWalletDebited: %v", err)
 	}
 
@@ -360,7 +360,7 @@ func TestPurchaseFlow_HappyPath(t *testing.T) {
 		UserID:        "user-1",
 		OfferingID:    "offering-1",
 	})
-	if err := handler.HandleOutcome(ctx, env); err != nil {
+	if err := handler.Handle(ctx, env); err != nil {
 		t.Fatalf("handleAccessGranted: %v", err)
 	}
 

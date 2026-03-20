@@ -244,7 +244,7 @@ func newHarness(t *testing.T) *testHarness {
 
 	// -- Payments (provider) --
 	provider := &configurableProvider{success: true}
-	paymentsConsumer := paymentsconsumer.NewHandler(processdeposit.New(provider, b, logger))
+	paymentsConsumer := paymentsconsumer.NewHandler(processdeposit.New(provider, b, logger), logger)
 
 	// -- Saga --
 	sagaRepo := sagarepository.NewMemoryRepository()

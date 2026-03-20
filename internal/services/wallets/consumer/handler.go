@@ -29,6 +29,19 @@ func NewHandler(service *service.Service, publisher Publisher, logger *slog.Logg
 	return &Handler{service: service, publisher: publisher, logger: logger}
 }
 
+// Handle routes an incoming wallets command to the matching handler.
+func (h *Handler) Handle(ctx context.Context, env messaging.Envelope) error {
+	switch env.Type {
+	case messaging.RoutingKeyWalletDebitRequested:
+		return h.HandleWalletDebitRequested(ctx, env)
+	case messaging.RoutingKeyWalletCreditRequested:
+		return h.HandleWalletCreditRequested(ctx, env)
+	default:
+		h.logger.Warn("unknown message type", slog.String("type", env.Type))
+		return nil
+	}
+}
+
 // HandleWalletDebitRequested processes a wallet.debit.requested command.
 func (h *Handler) HandleWalletDebitRequested(ctx context.Context, env messaging.Envelope) error {
 	var cmd messaging.WalletDebitRequested

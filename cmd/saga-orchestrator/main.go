@@ -135,7 +135,7 @@ func main() {
 
 	// Start AMQP consumer in background
 	go func() {
-		if err := consumer.Consume(ctx, messaging.QueueSagaOutcomes, amqpHandler.HandleOutcome); err != nil && ctx.Err() == nil {
+		if err := consumer.Consume(ctx, messaging.QueueSagaOutcomes, amqpHandler.Handle); err != nil && ctx.Err() == nil {
 			logger.Error("consumer stopped unexpectedly", "error", err)
 			cancel()
 		}

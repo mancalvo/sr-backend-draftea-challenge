@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -118,17 +117,7 @@ func main() {
 
 	// Start AMQP consumer in background
 	go func() {
-		if err := consumer.Consume(ctx, messaging.QueueWalletsCommands, func(msgCtx context.Context, env messaging.Envelope) error {
-			switch env.Type {
-			case messaging.RoutingKeyWalletDebitRequested:
-				return amqpHandler.HandleWalletDebitRequested(msgCtx, env)
-			case messaging.RoutingKeyWalletCreditRequested:
-				return amqpHandler.HandleWalletCreditRequested(msgCtx, env)
-			default:
-				logger.Warn("unknown message type", slog.String("type", env.Type))
-				return nil
-			}
-		}); err != nil && ctx.Err() == nil {
+		if err := consumer.Consume(ctx, messaging.QueueWalletsCommands, amqpHandler.Handle); err != nil && ctx.Err() == nil {
 			logger.Error("consumer stopped unexpectedly", "error", err)
 			cancel()
 		}

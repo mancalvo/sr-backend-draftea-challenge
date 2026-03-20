@@ -19,7 +19,7 @@ func testLogger() *slog.Logger {
 }
 
 func NewConsumerHandler(provider processdeposit.Provider, publisher processdeposit.Publisher, logger *slog.Logger) *Handler {
-	return NewHandler(processdeposit.New(provider, publisher, logger))
+	return NewHandler(processdeposit.New(provider, publisher, logger), logger)
 }
 
 // mockPublisher records publish calls for test verification.
@@ -107,7 +107,7 @@ func TestHandleDepositRequested_ProviderSuccess(t *testing.T) {
 	}
 	env := makeEnvelope(t, messaging.RoutingKeyDepositRequested, cmd)
 
-	err := ch.HandleDepositRequested(context.Background(), env)
+	err := ch.Handle(context.Background(), env)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestHandleDepositRequested_ProviderFailure(t *testing.T) {
 	}
 	env := makeEnvelope(t, messaging.RoutingKeyDepositRequested, cmd)
 
-	err := ch.HandleDepositRequested(context.Background(), env)
+	err := ch.Handle(context.Background(), env)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestHandleDepositRequested_ProviderError(t *testing.T) {
 	}
 	env := makeEnvelope(t, messaging.RoutingKeyDepositRequested, cmd)
 
-	err := ch.HandleDepositRequested(context.Background(), env)
+	err := ch.Handle(context.Background(), env)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -216,10 +216,10 @@ func TestHandleDepositRequested_DuplicateDelivery_ReplaysSuccessWithoutExtraChar
 	}
 	env := makeEnvelope(t, messaging.RoutingKeyDepositRequested, cmd)
 
-	if err := ch.HandleDepositRequested(context.Background(), env); err != nil {
+	if err := ch.Handle(context.Background(), env); err != nil {
 		t.Fatalf("first delivery: %v", err)
 	}
-	if err := ch.HandleDepositRequested(context.Background(), env); err != nil {
+	if err := ch.Handle(context.Background(), env); err != nil {
 		t.Fatalf("duplicate delivery: %v", err)
 	}
 
@@ -258,10 +258,10 @@ func TestHandleDepositRequested_DuplicateDelivery_ReplaysFailureWithoutExtraChar
 	}
 	env := makeEnvelope(t, messaging.RoutingKeyDepositRequested, cmd)
 
-	if err := ch.HandleDepositRequested(context.Background(), env); err != nil {
+	if err := ch.Handle(context.Background(), env); err != nil {
 		t.Fatalf("first delivery: %v", err)
 	}
-	if err := ch.HandleDepositRequested(context.Background(), env); err != nil {
+	if err := ch.Handle(context.Background(), env); err != nil {
 		t.Fatalf("duplicate delivery: %v", err)
 	}
 
@@ -282,5 +282,18 @@ func TestHandleDepositRequested_DuplicateDelivery_ReplaysFailureWithoutExtraChar
 		if outcome.Reason != "card declined" {
 			t.Fatalf("call %d reason = %q, want card declined", i, outcome.Reason)
 		}
+	}
+}
+
+func TestHandle_UnknownMessageType_Ignored(t *testing.T) {
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(&mockProvider{}, pub, testLogger())
+
+	env := makeEnvelope(t, "payments.unknown", map[string]string{"status": "noop"})
+	if err := ch.Handle(context.Background(), env); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pub.calls) != 0 {
+		t.Fatalf("publish calls = %d, want 0", len(pub.calls))
 	}
 }

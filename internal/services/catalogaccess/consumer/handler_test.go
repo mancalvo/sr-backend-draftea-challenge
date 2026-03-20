@@ -124,7 +124,7 @@ func TestHandleAccessGrantRequested_Success(t *testing.T) {
 	}
 	env := makeEnvelope(t, messaging.RoutingKeyAccessGrantRequested, cmd)
 
-	err := ch.HandleAccessGrantRequested(context.Background(), env)
+	err := ch.Handle(context.Background(), env)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -154,6 +154,20 @@ func TestHandleAccessGrantRequested_Success(t *testing.T) {
 	}
 	if call.CorrelationID != "corr-test" {
 		t.Errorf("correlation_id = %q, want corr-test", call.CorrelationID)
+	}
+}
+
+func TestHandle_UnknownMessageType_Ignored(t *testing.T) {
+	repo := seedRepo(false)
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(repo, pub, testLogger())
+
+	env := makeEnvelope(t, "access.unknown", map[string]string{"status": "noop"})
+	if err := ch.Handle(context.Background(), env); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pub.calls) != 0 {
+		t.Fatalf("publish calls = %d, want 0", len(pub.calls))
 	}
 }
 
