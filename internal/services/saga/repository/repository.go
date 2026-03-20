@@ -60,6 +60,10 @@ type PostgresRepository struct {
 	db *sql.DB
 }
 
+type scanner interface {
+	Scan(dest ...any) error
+}
+
 // NewPostgresRepository creates a new PostgresRepository.
 func NewPostgresRepository(db *sql.DB) *PostgresRepository {
 	return &PostgresRepository{db: db}
@@ -167,28 +171,11 @@ func (r *PostgresRepository) ListTimedOutSagas(ctx context.Context, now time.Tim
 
 	var result []domain.SagaInstance
 	for rows.Next() {
-		var s domain.SagaInstance
-		var outcome sql.NullString
-		var currentStep sql.NullString
-		var timeoutAt sql.NullTime
-		if err := rows.Scan(
-			&s.ID, &s.TransactionID, &s.Type, &s.Status,
-			&outcome, &currentStep, &s.Payload, &timeoutAt,
-			&s.CreatedAt, &s.UpdatedAt,
-		); err != nil {
+		saga, err := scanSaga(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan saga: %w", err)
 		}
-		if outcome.Valid {
-			o := domain.SagaOutcome(outcome.String)
-			s.Outcome = &o
-		}
-		if currentStep.Valid {
-			s.CurrentStep = &currentStep.String
-		}
-		if timeoutAt.Valid {
-			s.TimeoutAt = &timeoutAt.Time
-		}
-		result = append(result, s)
+		result = append(result, *saga)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("saga rows: %w", err)
@@ -236,7 +223,7 @@ func (r *PostgresRepository) GetIdempotencyKey(ctx context.Context, scope, key s
 	return &ik, nil
 }
 
-func scanSaga(row *sql.Row) (*domain.SagaInstance, error) {
+func scanSaga(row scanner) (*domain.SagaInstance, error) {
 	var s domain.SagaInstance
 	var outcome sql.NullString
 	var currentStep sql.NullString

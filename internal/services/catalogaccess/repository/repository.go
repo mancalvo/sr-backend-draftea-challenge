@@ -52,6 +52,10 @@ type PostgresRepository struct {
 	db *sql.DB
 }
 
+type scanner interface {
+	Scan(dest ...any) error
+}
+
 // NewPostgresRepository creates a new PostgresRepository.
 func NewPostgresRepository(db *sql.DB) *PostgresRepository {
 	return &PostgresRepository{db: db}
@@ -97,14 +101,14 @@ func (r *PostgresRepository) GetActiveAccess(ctx context.Context, userID, offeri
 	const q = `SELECT id, user_id, offering_id, transaction_id, status, granted_at, revoked_at, created_at, updated_at
 		FROM catalog_access.access_records
 		WHERE user_id = $1 AND offering_id = $2 AND status = 'active'`
-	return r.scanAccessRecord(r.db.QueryRowContext(ctx, q, userID, offeringID))
+	return scanAccessRecord(r.db.QueryRowContext(ctx, q, userID, offeringID))
 }
 
 func (r *PostgresRepository) GetActiveAccessByTransaction(ctx context.Context, transactionID string) (*domain.AccessRecord, error) {
 	const q = `SELECT id, user_id, offering_id, transaction_id, status, granted_at, revoked_at, created_at, updated_at
 		FROM catalog_access.access_records
 		WHERE transaction_id = $1 AND status = 'active'`
-	return r.scanAccessRecord(r.db.QueryRowContext(ctx, q, transactionID))
+	return scanAccessRecord(r.db.QueryRowContext(ctx, q, transactionID))
 }
 
 func (r *PostgresRepository) GetAccessByTransaction(ctx context.Context, transactionID string) (*domain.AccessRecord, error) {
@@ -113,7 +117,7 @@ func (r *PostgresRepository) GetAccessByTransaction(ctx context.Context, transac
 		WHERE transaction_id = $1
 		ORDER BY created_at DESC
 		LIMIT 1`
-	return r.scanAccessRecord(r.db.QueryRowContext(ctx, q, transactionID))
+	return scanAccessRecord(r.db.QueryRowContext(ctx, q, transactionID))
 }
 
 func (r *PostgresRepository) ListEntitlements(ctx context.Context, userID string) ([]domain.Entitlement, error) {
@@ -147,7 +151,7 @@ func (r *PostgresRepository) GrantAccess(ctx context.Context, userID, offeringID
 		VALUES ($1, $2, $3, 'active', now())
 		RETURNING id, user_id, offering_id, transaction_id, status, granted_at, revoked_at, created_at, updated_at`
 	row := r.db.QueryRowContext(ctx, q, userID, offeringID, transactionID)
-	ar, err := r.scanAccessRecord(row)
+	ar, err := scanAccessRecord(row)
 	if err != nil {
 		// Check for unique constraint violation on the partial unique index.
 		if platformdatabase.IsUniqueViolation(err) {
@@ -163,7 +167,7 @@ func (r *PostgresRepository) RevokeAccess(ctx context.Context, transactionID str
 		SET status = 'revoked', revoked_at = now(), updated_at = now()
 		WHERE transaction_id = $1 AND status = 'active'
 		RETURNING id, user_id, offering_id, transaction_id, status, granted_at, revoked_at, created_at, updated_at`
-	ar, err := r.scanAccessRecord(r.db.QueryRowContext(ctx, q, transactionID))
+	ar, err := scanAccessRecord(r.db.QueryRowContext(ctx, q, transactionID))
 	if errors.Is(err, ErrNotFound) {
 		return nil, ErrNoActiveAccess
 	}
@@ -174,7 +178,7 @@ func (r *PostgresRepository) RevokeAccess(ctx context.Context, transactionID str
 }
 
 // scanAccessRecord scans a single row into an AccessRecord.
-func (r *PostgresRepository) scanAccessRecord(row *sql.Row) (*domain.AccessRecord, error) {
+func scanAccessRecord(row scanner) (*domain.AccessRecord, error) {
 	var a domain.AccessRecord
 	var revokedAt sql.NullTime
 	err := row.Scan(

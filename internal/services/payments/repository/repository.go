@@ -47,6 +47,10 @@ type PostgresRepository struct {
 	db *sql.DB
 }
 
+type scanner interface {
+	Scan(dest ...any) error
+}
+
 // NewPostgresRepository creates a new PostgresRepository.
 func NewPostgresRepository(db *sql.DB) *PostgresRepository {
 	return &PostgresRepository{db: db}
@@ -97,31 +101,11 @@ func (r *PostgresRepository) ListTransactionsByUserID(ctx context.Context, userI
 
 	var result []domain.Transaction
 	for rows.Next() {
-		var t domain.Transaction
-		var offeringID sql.NullString
-		var originalTransactionID sql.NullString
-		var providerReference sql.NullString
-		var statusReason sql.NullString
-		if err := rows.Scan(
-			&t.ID, &t.UserID, &t.Type, &t.Status,
-			&t.Amount, &t.Currency, &offeringID, &originalTransactionID, &providerReference, &statusReason,
-			&t.CreatedAt, &t.UpdatedAt,
-		); err != nil {
+		txn, err := scanTransaction(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan transaction: %w", err)
 		}
-		if offeringID.Valid {
-			t.OfferingID = &offeringID.String
-		}
-		if originalTransactionID.Valid {
-			t.OriginalTransactionID = &originalTransactionID.String
-		}
-		if providerReference.Valid {
-			t.ProviderReference = &providerReference.String
-		}
-		if statusReason.Valid {
-			t.StatusReason = &statusReason.String
-		}
-		result = append(result, t)
+		result = append(result, *txn)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("transaction rows: %w", err)
@@ -165,31 +149,11 @@ func (r *PostgresRepository) ListTransactionsByUserIDPaginated(ctx context.Conte
 
 	var result []domain.Transaction
 	for rows.Next() {
-		var t domain.Transaction
-		var offeringID sql.NullString
-		var originalTransactionID sql.NullString
-		var providerReference sql.NullString
-		var statusReason sql.NullString
-		if err := rows.Scan(
-			&t.ID, &t.UserID, &t.Type, &t.Status,
-			&t.Amount, &t.Currency, &offeringID, &originalTransactionID, &providerReference, &statusReason,
-			&t.CreatedAt, &t.UpdatedAt,
-		); err != nil {
+		txn, err := scanTransaction(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan transaction: %w", err)
 		}
-		if offeringID.Valid {
-			t.OfferingID = &offeringID.String
-		}
-		if originalTransactionID.Valid {
-			t.OriginalTransactionID = &originalTransactionID.String
-		}
-		if providerReference.Valid {
-			t.ProviderReference = &providerReference.String
-		}
-		if statusReason.Valid {
-			t.StatusReason = &statusReason.String
-		}
-		result = append(result, t)
+		result = append(result, *txn)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("transaction rows: %w", err)
@@ -310,8 +274,8 @@ func (r *PostgresRepository) UpdateTransactionStatus(ctx context.Context, id str
 	return &t, nil
 }
 
-// scanTransaction scans a single row into a Transaction.
-func scanTransaction(row *sql.Row) (*domain.Transaction, error) {
+// scanTransaction scans a single row or rows cursor item into a Transaction.
+func scanTransaction(row scanner) (*domain.Transaction, error) {
 	var t domain.Transaction
 	var offeringID sql.NullString
 	var originalTransactionID sql.NullString
