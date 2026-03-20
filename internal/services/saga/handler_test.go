@@ -117,6 +117,34 @@ func (m *mockPublisher) Publish(_ context.Context, _, _, _ string, _ any) error 
 	return nil
 }
 
+type noTransitionRepo struct {
+	*MemoryRepository
+	updateCalls int
+	created     []*SagaInstance
+}
+
+func newNoTransitionRepo() *noTransitionRepo {
+	return &noTransitionRepo{MemoryRepository: NewMemoryRepository()}
+}
+
+func (r *noTransitionRepo) CreateSaga(ctx context.Context, saga *SagaInstance) (*SagaInstance, error) {
+	snapshot := *saga
+	if saga.CurrentStep != nil {
+		step := *saga.CurrentStep
+		snapshot.CurrentStep = &step
+	}
+	if saga.Payload != nil {
+		snapshot.Payload = append(json.RawMessage(nil), saga.Payload...)
+	}
+	r.created = append(r.created, &snapshot)
+	return r.MemoryRepository.CreateSaga(ctx, saga)
+}
+
+func (r *noTransitionRepo) UpdateSagaStatus(_ context.Context, _ string, _ SagaStatus, _ *SagaOutcome, _ *string) (*SagaInstance, error) {
+	r.updateCalls++
+	return nil, errors.New("unexpected update saga status")
+}
+
 // newTestRouter wires up the saga handler routes on a chi router for testing.
 func newTestRouter(handler *Handler) http.Handler {
 	r := chi.NewRouter()
@@ -954,6 +982,71 @@ func TestHandlePurchase_UsesAuthoritativeCatalogPricing(t *testing.T) {
 	}
 }
 
+func TestCommandIngress_CreatesRunningSagaWithoutFollowupTransition(t *testing.T) {
+	tests := []struct {
+		name        string
+		path        string
+		body        []byte
+		currentStep string
+		catalog     CatalogClient
+		payments    PaymentsClient
+	}{
+		{
+			name:        "deposit",
+			path:        "/deposits",
+			body:        mustJSON(t, DepositCommand{UserID: "user-1", Amount: 10000, Currency: "ARS", IdempotencyKey: "dep-running-create"}),
+			currentStep: "deposit_charge",
+			catalog:     &mockCatalogClient{},
+			payments:    &mockPaymentsClient{},
+		},
+		{
+			name:        "purchase",
+			path:        "/purchases",
+			body:        mustJSON(t, PurchaseCommand{UserID: "user-1", OfferingID: "offering-1", IdempotencyKey: "pur-running-create"}),
+			currentStep: "purchase_debit",
+			catalog:     &mockCatalogClient{purchaseResult: &PrecheckResult{Allowed: true}},
+			payments:    &mockPaymentsClient{},
+		},
+		{
+			name:        "refund",
+			path:        "/refunds",
+			body:        mustJSON(t, RefundCommand{UserID: "user-1", OfferingID: "offering-1", TransactionID: "orig-txn-1", IdempotencyKey: "ref-running-create"}),
+			currentStep: "refund_revoke_access",
+			catalog:     &mockCatalogClient{refundResult: &PrecheckResult{Allowed: true}},
+			payments:    &mockPaymentsClient{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newNoTransitionRepo()
+			handler := NewHandler(repo, tt.catalog, tt.payments, &mockPublisher{}, 30*time.Second, testLogger())
+			router := newTestRouter(handler)
+
+			req := httptest.NewRequest(http.MethodPost, tt.path, bytes.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+			}
+			if repo.updateCalls != 0 {
+				t.Fatalf("unexpected update calls = %d", repo.updateCalls)
+			}
+			if len(repo.created) != 1 {
+				t.Fatalf("created sagas = %d, want 1", len(repo.created))
+			}
+			if repo.created[0].Status != StatusRunning {
+				t.Fatalf("created status = %s, want running", repo.created[0].Status)
+			}
+			if repo.created[0].CurrentStep == nil || *repo.created[0].CurrentStep != tt.currentStep {
+				t.Fatalf("current_step = %v, want %s", repo.created[0].CurrentStep, tt.currentStep)
+			}
+		})
+	}
+}
+
 func TestHandleRefund_RejectsClientMoneyFields(t *testing.T) {
 	repo := NewMemoryRepository()
 	catalog := &mockCatalogClient{
@@ -1040,6 +1133,15 @@ func TestHandleRefund_UsesOriginalTransactionMoney(t *testing.T) {
 	if payload.Currency != "USD" {
 		t.Errorf("refund payload currency = %s, want USD", payload.Currency)
 	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	body, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal json: %v", err)
+	}
+	return body
 }
 
 // TestIdempotencyKey_SameKeyDifferentScopes verifies that the same idempotency

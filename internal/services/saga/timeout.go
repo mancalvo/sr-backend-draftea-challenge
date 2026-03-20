@@ -25,9 +25,9 @@ func DefaultTimeoutConfig() TimeoutConfig {
 	}
 }
 
-// TimeoutPoller periodically scans for sagas whose timeout_at has passed and
-// transitions them to timed_out status. The timeout is persisted in the database
-// (not held in memory), so it survives restarts.
+// TimeoutPoller periodically scans running sagas whose timeout_at has passed
+// and transitions them to timed_out status. The timeout is persisted in the
+// database (not held in memory), so it survives restarts.
 type TimeoutPoller struct {
 	repo           Repository
 	paymentsClient PaymentsClient

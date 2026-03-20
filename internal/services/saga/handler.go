@@ -108,7 +108,7 @@ func (h *Handler) HandleDeposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 2: Create saga.
+	// Step 2: Create the saga directly in running state with its first step set.
 	payload, _ := json.Marshal(DepositPayload{
 		UserID:   cmd.UserID,
 		Amount:   cmd.Amount,
@@ -116,10 +116,12 @@ func (h *Handler) HandleDeposit(w http.ResponseWriter, r *http.Request) {
 	})
 
 	timeoutAt := time.Now().UTC().Add(h.sagaTimeout)
+	step := "deposit_charge"
 	sagaInstance, err := h.repo.CreateSaga(r.Context(), &SagaInstance{
 		TransactionID: transactionID,
 		Type:          SagaTypeDeposit,
-		Status:        StatusCreated,
+		Status:        StatusRunning,
+		CurrentStep:   &step,
 		Payload:       payload,
 		TimeoutAt:     &timeoutAt,
 	})
@@ -131,14 +133,7 @@ func (h *Handler) HandleDeposit(w http.ResponseWriter, r *http.Request) {
 
 	logger.Info("deposit saga created", "saga_id", sagaInstance.ID)
 
-	// Step 3: Transition saga to running and publish payments.deposit.requested.
-	step := "deposit_charge"
-	if _, err := h.repo.UpdateSagaStatus(r.Context(), sagaInstance.ID, StatusRunning, nil, &step); err != nil {
-		logger.Error("failed to transition saga to running", "error", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-
+	// Step 3: Publish payments.deposit.requested.
 	if err := h.publisher.Publish(r.Context(),
 		messaging.ExchangeCommands,
 		messaging.RoutingKeyDepositRequested,
@@ -232,7 +227,7 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 3: Create saga.
+	// Step 3: Create the saga directly in running state with its first step set.
 	payload, _ := json.Marshal(PurchasePayload{
 		UserID:     cmd.UserID,
 		OfferingID: cmd.OfferingID,
@@ -241,10 +236,12 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 	})
 
 	timeoutAt := time.Now().UTC().Add(h.sagaTimeout)
+	step := "purchase_debit"
 	sagaInstance, err := h.repo.CreateSaga(r.Context(), &SagaInstance{
 		TransactionID: transactionID,
 		Type:          SagaTypePurchase,
-		Status:        StatusCreated,
+		Status:        StatusRunning,
+		CurrentStep:   &step,
 		Payload:       payload,
 		TimeoutAt:     &timeoutAt,
 	})
@@ -256,14 +253,7 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 
 	logger.Info("purchase saga created", "saga_id", sagaInstance.ID)
 
-	// Step 4: Transition saga to running and publish wallet.debit.requested.
-	step := "purchase_debit"
-	if _, err := h.repo.UpdateSagaStatus(r.Context(), sagaInstance.ID, StatusRunning, nil, &step); err != nil {
-		logger.Error("failed to transition saga to running", "error", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-
+	// Step 4: Publish wallet.debit.requested.
 	if err := h.publisher.Publish(r.Context(),
 		messaging.ExchangeCommands,
 		messaging.RoutingKeyWalletDebitRequested,
@@ -378,7 +368,7 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 3: Create saga.
+	// Step 3: Create the saga directly in running state with its first step set.
 	payload, _ := json.Marshal(RefundPayload{
 		UserID:              cmd.UserID,
 		OfferingID:          cmd.OfferingID,
@@ -388,10 +378,12 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 	})
 
 	timeoutAt := time.Now().UTC().Add(h.sagaTimeout)
+	step := "refund_revoke_access"
 	sagaInstance, err := h.repo.CreateSaga(r.Context(), &SagaInstance{
 		TransactionID: transactionID,
 		Type:          SagaTypeRefund,
-		Status:        StatusCreated,
+		Status:        StatusRunning,
+		CurrentStep:   &step,
 		Payload:       payload,
 		TimeoutAt:     &timeoutAt,
 	})
@@ -403,14 +395,7 @@ func (h *Handler) HandleRefund(w http.ResponseWriter, r *http.Request) {
 
 	logger.Info("refund saga created", "saga_id", sagaInstance.ID)
 
-	// Step 4: Transition saga to running and publish access.revoke.requested.
-	step := "refund_revoke_access"
-	if _, err := h.repo.UpdateSagaStatus(r.Context(), sagaInstance.ID, StatusRunning, nil, &step); err != nil {
-		logger.Error("failed to transition saga to running", "error", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-
+	// Step 4: Publish access.revoke.requested.
 	if err := h.publisher.Publish(r.Context(),
 		messaging.ExchangeCommands,
 		messaging.RoutingKeyAccessRevokeRequested,

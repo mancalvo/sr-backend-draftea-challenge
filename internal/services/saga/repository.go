@@ -37,8 +37,8 @@ type Repository interface {
 	// Returns ErrNotFound or ErrIllegalTransition on failure.
 	UpdateSagaStatus(ctx context.Context, id string, status SagaStatus, outcome *SagaOutcome, currentStep *string) (*SagaInstance, error)
 
-	// ListTimedOutSagas returns sagas whose timeout_at has passed and are in an
-	// active status (running or created).
+	// ListTimedOutSagas returns sagas whose timeout_at has passed and are still
+	// actively executing.
 	ListTimedOutSagas(ctx context.Context, now time.Time) ([]SagaInstance, error)
 
 	// SaveIdempotencyKey stores a key-response pair. Returns ErrIdempotencyKeyExists
@@ -153,7 +153,7 @@ func (r *PostgresRepository) UpdateSagaStatus(ctx context.Context, id string, st
 func (r *PostgresRepository) ListTimedOutSagas(ctx context.Context, now time.Time) ([]SagaInstance, error) {
 	const q = `SELECT id, transaction_id, type, status, outcome, current_step, payload, timeout_at, created_at, updated_at
 		FROM saga_orchestrator.saga_instances
-		WHERE timeout_at <= $1 AND status IN ('running', 'created')
+		WHERE timeout_at <= $1 AND status = 'running'
 		ORDER BY timeout_at ASC`
 
 	rows, err := r.db.QueryContext(ctx, q, now)
@@ -380,8 +380,7 @@ func (m *MemoryRepository) ListTimedOutSagas(_ context.Context, now time.Time) (
 
 	var result []SagaInstance
 	for _, s := range m.sagas {
-		if s.TimeoutAt != nil && !s.TimeoutAt.After(now) &&
-			(s.Status == StatusRunning || s.Status == StatusCreated) {
+		if s.TimeoutAt != nil && !s.TimeoutAt.After(now) && s.Status == StatusRunning {
 			result = append(result, *s)
 		}
 	}

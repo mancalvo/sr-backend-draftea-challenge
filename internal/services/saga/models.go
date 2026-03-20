@@ -64,7 +64,6 @@ const (
 var legalSagaTransitions = map[SagaStatus]map[SagaStatus]bool{
 	StatusCreated: {
 		StatusRunning: true,
-		StatusFailed:  true,
 	},
 	StatusRunning: {
 		StatusCompleted:              true,

@@ -180,7 +180,7 @@ func TestMemoryRepository_ListTimedOutSagas(t *testing.T) {
 	repo.CreateSaga(ctx, &SagaInstance{
 		TransactionID: "txn-1",
 		Type:          SagaTypeDeposit,
-		Status:        StatusCreated,
+		Status:        StatusRunning,
 		TimeoutAt:     &past,
 	})
 
@@ -188,20 +188,28 @@ func TestMemoryRepository_ListTimedOutSagas(t *testing.T) {
 	repo.CreateSaga(ctx, &SagaInstance{
 		TransactionID: "txn-2",
 		Type:          SagaTypeDeposit,
-		Status:        StatusCreated,
+		Status:        StatusRunning,
 		TimeoutAt:     &future,
 	})
 
-	// Saga already completed (should not be returned).
+	// Saga still in created state (should not be returned).
 	s3, _ := repo.CreateSaga(ctx, &SagaInstance{
 		TransactionID: "txn-3",
 		Type:          SagaTypeDeposit,
 		Status:        StatusCreated,
 		TimeoutAt:     &past,
 	})
-	repo.UpdateSagaStatus(ctx, s3.ID, StatusRunning, nil, nil)
+
+	// Saga already completed (should not be returned).
+	s4, _ := repo.CreateSaga(ctx, &SagaInstance{
+		TransactionID: "txn-4",
+		Type:          SagaTypeDeposit,
+		Status:        StatusCreated,
+		TimeoutAt:     &past,
+	})
+	repo.UpdateSagaStatus(ctx, s4.ID, StatusRunning, nil, nil)
 	outcome := OutcomeSucceeded
-	repo.UpdateSagaStatus(ctx, s3.ID, StatusCompleted, &outcome, nil)
+	repo.UpdateSagaStatus(ctx, s4.ID, StatusCompleted, &outcome, nil)
 
 	timedOut, err := repo.ListTimedOutSagas(ctx, time.Now().UTC())
 	if err != nil {
@@ -212,6 +220,9 @@ func TestMemoryRepository_ListTimedOutSagas(t *testing.T) {
 	}
 	if timedOut[0].TransactionID != "txn-1" {
 		t.Errorf("expected txn-1, got %s", timedOut[0].TransactionID)
+	}
+	if s3.TransactionID == timedOut[0].TransactionID {
+		t.Fatalf("created saga should not be eligible for timeout polling")
 	}
 }
 

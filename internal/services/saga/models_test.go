@@ -8,7 +8,6 @@ func TestValidateSagaTransition_LegalTransitions(t *testing.T) {
 		to   SagaStatus
 	}{
 		{StatusCreated, StatusRunning},
-		{StatusCreated, StatusFailed},
 		{StatusRunning, StatusCompleted},
 		{StatusRunning, StatusFailed},
 		{StatusRunning, StatusTimedOut},
@@ -44,6 +43,7 @@ func TestValidateSagaTransition_IllegalTransitions(t *testing.T) {
 		{StatusFailed, StatusCompleted},
 		{StatusReconciliationRequired, StatusCompleted},
 		// Invalid backward transitions.
+		{StatusCreated, StatusFailed},
 		{StatusRunning, StatusCreated},
 		{StatusCompensating, StatusRunning},
 		{StatusTimedOut, StatusCreated},
