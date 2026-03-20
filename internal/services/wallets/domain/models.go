@@ -1,6 +1,4 @@
-// Package wallets implements the wallets service: wallet balances, wallet movements,
-// and concurrency-safe debit/credit operations.
-package wallets
+package domain
 
 import "time"
 
@@ -33,11 +31,4 @@ type WalletMovement struct {
 	BalanceBefore int64        `json:"balance_before"`
 	BalanceAfter  int64        `json:"balance_after"`
 	CreatedAt     time.Time    `json:"created_at"`
-}
-
-// BalanceResponse is the public response for GET /wallets/{user_id}/balance.
-type BalanceResponse struct {
-	UserID   string `json:"user_id"`
-	Balance  int64  `json:"balance"`
-	Currency string `json:"currency"`
 }

@@ -1,4 +1,4 @@
-package wallets
+package api
 
 import (
 	"errors"
@@ -9,21 +9,29 @@ import (
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/repository"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/service"
 )
+
+// BalanceResponse is the public response for GET /wallets/{user_id}/balance.
+type BalanceResponse struct {
+	UserID   string `json:"user_id"`
+	Balance  int64  `json:"balance"`
+	Currency string `json:"currency"`
+}
 
 // Handler provides HTTP handlers for the wallets service.
 type Handler struct {
-	repo   Repository
-	logger *slog.Logger
+	service *service.Service
+	logger  *slog.Logger
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(repo Repository, logger *slog.Logger) *Handler {
-	return &Handler{repo: repo, logger: logger}
+func NewHandler(service *service.Service, logger *slog.Logger) *Handler {
+	return &Handler{service: service, logger: logger}
 }
 
 // GetBalance handles GET /wallets/{user_id}/balance.
-// Returns the current balance for the specified user's wallet.
 func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "user_id")
 	if userID == "" {
@@ -35,8 +43,8 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		slog.String("user_id", userID),
 	)
 
-	wallet, err := h.repo.GetWalletByUserID(r.Context(), userID)
-	if errors.Is(err, ErrWalletNotFound) {
+	wallet, err := h.service.GetBalance(r.Context(), userID)
+	if errors.Is(err, repository.ErrWalletNotFound) {
 		httpx.ErrorWithCode(w, http.StatusNotFound, "wallet not found", "WALLET_NOT_FOUND")
 		return
 	}
