@@ -764,10 +764,7 @@ func TestListTransactions_StableOrderWithSameCreatedAt(t *testing.T) {
 			Amount: 1000, Currency: "ARS",
 			CreatedAt: now, UpdatedAt: now,
 		}
-		repo.mu.Lock()
-		repo.transactions[id] = txn
-		repo.order = append(repo.order, id)
-		repo.mu.Unlock()
+		repo.SeedTransaction(txn)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/transactions?user_id=user-1", nil)

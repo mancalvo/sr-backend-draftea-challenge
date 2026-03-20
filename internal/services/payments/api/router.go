@@ -1,4 +1,4 @@
-package payments
+package api
 
 import (
 	"log/slog"

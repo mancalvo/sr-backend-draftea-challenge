@@ -88,9 +88,9 @@ func main() {
 	}
 	consumer := rabbitmq.NewConsumer(consCh, logger, rabbitmq.DefaultRetryConfig())
 
-	// Provider (simulated for development)
+	// Provider (mock implementation for local development)
 	providerTimeout := config.GetEnvDuration("PROVIDER_CHARGE_TIMEOUT", 30*time.Second)
-	provider := payments.NewSimulatedProvider(100 * time.Millisecond)
+	provider := payments.NewMockProvider(100 * time.Millisecond)
 	_ = providerTimeout // used by orchestrator for saga timeout, not directly by provider
 
 	// Handlers

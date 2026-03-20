@@ -1,4 +1,4 @@
-package payments
+package api
 
 import (
 	"errors"
@@ -10,17 +10,20 @@ import (
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/repository"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/service"
 )
 
 // Handler provides HTTP handlers for the payments service.
 type Handler struct {
-	repo   Repository
-	logger *slog.Logger
+	service *service.Service
+	logger  *slog.Logger
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(repo Repository, logger *slog.Logger) *Handler {
-	return &Handler{repo: repo, logger: logger}
+func NewHandler(service *service.Service, logger *slog.Logger) *Handler {
+	return &Handler{service: service, logger: logger}
 }
 
 // CreateTransaction handles POST /internal/transactions.
@@ -37,11 +40,11 @@ func (h *Handler) CreateTransaction(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "id, user_id, and a positive amount are required")
 		return
 	}
-	if !ValidTransactionType(req.Type) {
+	if !domain.ValidTransactionType(req.Type) {
 		httpx.Error(w, http.StatusBadRequest, "invalid transaction type")
 		return
 	}
-	if req.Type == TransactionTypeRefund && (req.OriginalTransactionID == nil || *req.OriginalTransactionID == "") {
+	if req.Type == domain.TransactionTypeRefund && (req.OriginalTransactionID == nil || *req.OriginalTransactionID == "") {
 		httpx.Error(w, http.StatusBadRequest, "original_transaction_id is required for refunds")
 		return
 	}
@@ -55,19 +58,19 @@ func (h *Handler) CreateTransaction(w http.ResponseWriter, r *http.Request) {
 		slog.String("type", string(req.Type)),
 	)
 
-	txn := &Transaction{
+	txn := &domain.Transaction{
 		ID:                    req.ID,
 		UserID:                req.UserID,
 		Type:                  req.Type,
-		Status:                StatusPending,
+		Status:                domain.StatusPending,
 		Amount:                req.Amount,
 		Currency:              req.Currency,
 		OfferingID:            req.OfferingID,
 		OriginalTransactionID: req.OriginalTransactionID,
 	}
 
-	created, err := h.repo.CreateTransaction(r.Context(), txn)
-	if errors.Is(err, ErrDuplicateID) {
+	created, err := h.service.RegisterTransaction(r.Context(), txn)
+	if errors.Is(err, repository.ErrDuplicateID) {
 		httpx.ErrorWithCode(w, http.StatusConflict, "transaction already exists", "DUPLICATE_TRANSACTION")
 		return
 	}
@@ -96,7 +99,7 @@ func (h *Handler) UpdateTransactionStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if !ValidTransactionStatus(req.Status) {
+	if !domain.ValidTransactionStatus(req.Status) {
 		httpx.Error(w, http.StatusBadRequest, "invalid status")
 		return
 	}
@@ -106,12 +109,12 @@ func (h *Handler) UpdateTransactionStatus(w http.ResponseWriter, r *http.Request
 		slog.String("target_status", string(req.Status)),
 	)
 
-	updated, err := h.repo.UpdateTransactionStatus(r.Context(), txnID, req.Status, req.StatusReason, req.ProviderReference)
-	if errors.Is(err, ErrNotFound) {
+	updated, err := h.service.UpdateTransactionStatus(r.Context(), txnID, req.Status, req.StatusReason, req.ProviderReference)
+	if errors.Is(err, repository.ErrNotFound) {
 		httpx.ErrorWithCode(w, http.StatusNotFound, "transaction not found", "TRANSACTION_NOT_FOUND")
 		return
 	}
-	if errors.Is(err, ErrIllegalTransition) {
+	if errors.Is(err, repository.ErrIllegalTransition) {
 		httpx.ErrorWithCode(w, http.StatusConflict, err.Error(), "ILLEGAL_TRANSITION")
 		return
 	}
@@ -134,8 +137,8 @@ func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txn, err := h.repo.GetTransactionByID(r.Context(), txnID)
-	if errors.Is(err, ErrNotFound) {
+	txn, err := h.service.GetTransaction(r.Context(), txnID)
+	if errors.Is(err, repository.ErrNotFound) {
 		httpx.ErrorWithCode(w, http.StatusNotFound, "transaction not found", "TRANSACTION_NOT_FOUND")
 		return
 	}
@@ -158,23 +161,23 @@ func (h *Handler) ListTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse optional limit.
-	limit := DefaultPageLimit
+	limit := domain.DefaultPageLimit
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 1 {
 			httpx.ErrorWithCode(w, http.StatusBadRequest, "limit must be a positive integer", "INVALID_LIMIT")
 			return
 		}
-		if parsed > MaxPageLimit {
-			parsed = MaxPageLimit
+		if parsed > domain.MaxPageLimit {
+			parsed = domain.MaxPageLimit
 		}
 		limit = parsed
 	}
 
 	// Parse optional cursor.
-	var cursor *Cursor
+	var cursor *domain.Cursor
 	if raw := r.URL.Query().Get("cursor"); raw != "" {
-		c, err := DecodeCursor(raw)
+		c, err := domain.DecodeCursor(raw)
 		if err != nil {
 			httpx.ErrorWithCode(w, http.StatusBadRequest, "invalid cursor", "INVALID_CURSOR")
 			return
@@ -182,7 +185,7 @@ func (h *Handler) ListTransactions(w http.ResponseWriter, r *http.Request) {
 		cursor = c
 	}
 
-	result, err := h.repo.ListTransactionsByUserIDPaginated(r.Context(), ListTransactionsQuery{
+	result, err := h.service.ListTransactions(r.Context(), domain.ListTransactionsQuery{
 		UserID: userID,
 		Limit:  limit,
 		Cursor: cursor,
@@ -196,7 +199,7 @@ func (h *Handler) ListTransactions(w http.ResponseWriter, r *http.Request) {
 	// Return empty array instead of null.
 	txns := result.Transactions
 	if txns == nil {
-		txns = []Transaction{}
+		txns = []domain.Transaction{}
 	}
 
 	resp := map[string]any{

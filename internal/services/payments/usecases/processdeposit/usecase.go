@@ -1,4 +1,4 @@
-package payments
+package processdeposit
 
 import (
 	"context"
@@ -14,28 +14,33 @@ type Publisher interface {
 	Publish(ctx context.Context, exchange, routingKey, correlationID string, payload any) error
 }
 
-// ConsumerHandler provides AMQP message handlers for payments commands.
-type ConsumerHandler struct {
+// Provider executes the external provider charge.
+type Provider interface {
+	Charge(ctx context.Context, transactionID, userID string, amount int64, currency string) (*ChargeResult, error)
+}
+
+// ChargeResult holds the outcome of a provider charge attempt.
+type ChargeResult struct {
+	Success     bool
+	ProviderRef string
+	Reason      string
+}
+
+// UseCase processes deposit requests through the provider.
+type UseCase struct {
 	provider  Provider
 	publisher Publisher
 	logger    *slog.Logger
 }
 
-// NewConsumerHandler creates a new ConsumerHandler.
-func NewConsumerHandler(provider Provider, publisher Publisher, logger *slog.Logger) *ConsumerHandler {
-	return &ConsumerHandler{provider: provider, publisher: publisher, logger: logger}
+// New creates a new deposit-processing use case.
+func New(provider Provider, publisher Publisher, logger *slog.Logger) *UseCase {
+	return &UseCase{provider: provider, publisher: publisher, logger: logger}
 }
 
-// HandleDepositRequested processes a payments.deposit.requested command.
-// It calls the external provider to execute the charge and publishes
-// either provider.charge.succeeded or provider.charge.failed as the outcome.
-func (c *ConsumerHandler) HandleDepositRequested(ctx context.Context, env messaging.Envelope) error {
-	var cmd messaging.DepositRequested
-	if err := env.DecodePayload(&cmd); err != nil {
-		return fmt.Errorf("decode payments.deposit.requested: %w", err)
-	}
-
-	logger := c.logger.With(
+// Execute processes a payments.deposit.requested command and publishes the corresponding outcome.
+func (u *UseCase) Execute(ctx context.Context, env messaging.Envelope, cmd messaging.DepositRequested) error {
+	logger := u.logger.With(
 		slog.String(logging.KeyTransactionID, cmd.TransactionID),
 		slog.String(logging.KeyCorrelationID, env.CorrelationID),
 		slog.String(logging.KeyMessageID, env.MessageID),
@@ -46,7 +51,7 @@ func (c *ConsumerHandler) HandleDepositRequested(ctx context.Context, env messag
 
 	logger.Info("processing deposit request via provider")
 
-	result, err := c.provider.Charge(ctx, cmd.TransactionID, cmd.UserID, cmd.Amount, cmd.Currency)
+	result, err := u.provider.Charge(ctx, cmd.TransactionID, cmd.UserID, cmd.Amount, cmd.Currency)
 	if err != nil {
 		logger.Error("provider charge error", "error", err)
 		return fmt.Errorf("provider charge: %w", err)
@@ -54,7 +59,7 @@ func (c *ConsumerHandler) HandleDepositRequested(ctx context.Context, env messag
 
 	if result.Success {
 		logger.Info("provider charge succeeded", "provider_ref", result.ProviderRef)
-		return c.publisher.Publish(ctx,
+		return u.publisher.Publish(ctx,
 			messaging.ExchangeOutcomes,
 			messaging.RoutingKeyProviderChargeSucceeded,
 			env.CorrelationID,
@@ -68,7 +73,7 @@ func (c *ConsumerHandler) HandleDepositRequested(ctx context.Context, env messag
 	}
 
 	logger.Warn("provider charge failed", "reason", result.Reason)
-	return c.publisher.Publish(ctx,
+	return u.publisher.Publish(ctx,
 		messaging.ExchangeOutcomes,
 		messaging.RoutingKeyProviderChargeFailed,
 		env.CorrelationID,

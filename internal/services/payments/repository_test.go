@@ -597,10 +597,7 @@ func TestMemoryRepo_ListPaginated_StableOrderSameCreatedAt(t *testing.T) {
 			Amount: 1000, Currency: "ARS",
 			CreatedAt: now, UpdatedAt: now,
 		}
-		repo.mu.Lock()
-		repo.transactions[id] = txn
-		repo.order = append(repo.order, id)
-		repo.mu.Unlock()
+		repo.SeedTransaction(txn)
 	}
 
 	result, err := repo.ListTransactionsByUserIDPaginated(ctx, ListTransactionsQuery{
@@ -636,10 +633,7 @@ func TestMemoryRepo_ListPaginated_CursorWithTiedTimestamps(t *testing.T) {
 			Amount: 1000, Currency: "ARS",
 			CreatedAt: now, UpdatedAt: now,
 		}
-		repo.mu.Lock()
-		repo.transactions[id] = txn
-		repo.order = append(repo.order, id)
-		repo.mu.Unlock()
+		repo.SeedTransaction(txn)
 	}
 
 	// Page 1: limit 2 => txn-d, txn-c (DESC by ID).
