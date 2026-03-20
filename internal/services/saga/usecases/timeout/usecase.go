@@ -1,4 +1,4 @@
-package saga
+package timeout
 
 import (
 	"context"
@@ -6,6 +6,10 @@ import (
 	"time"
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/activities"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
 )
 
 // TimeoutConfig holds configuration for the saga timeout poller.
@@ -29,16 +33,16 @@ func DefaultTimeoutConfig() TimeoutConfig {
 // and transitions them to timed_out status. The timeout is persisted in the
 // database (not held in memory), so it survives restarts.
 type TimeoutPoller struct {
-	repo           Repository
-	paymentsClient PaymentsClient
+	repo           repository.Repository
+	paymentsClient client.PaymentsClient
 	config         TimeoutConfig
 	logger         *slog.Logger
 }
 
 // NewTimeoutPoller creates a new TimeoutPoller.
 func NewTimeoutPoller(
-	repo Repository,
-	paymentsClient PaymentsClient,
+	repo repository.Repository,
+	paymentsClient client.PaymentsClient,
 	config TimeoutConfig,
 	logger *slog.Logger,
 ) *TimeoutPoller {
@@ -71,6 +75,11 @@ func (p *TimeoutPoller) Run(ctx context.Context) {
 	}
 }
 
+// Poll performs a single timeout scan.
+func (p *TimeoutPoller) Poll(ctx context.Context) {
+	p.poll(ctx)
+}
+
 // poll checks for timed-out sagas and transitions them.
 func (p *TimeoutPoller) poll(ctx context.Context) {
 	now := time.Now().UTC()
@@ -89,14 +98,14 @@ func (p *TimeoutPoller) poll(ctx context.Context) {
 		)
 
 		reason := "saga timeout exceeded"
-		if err := p.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "timed_out", &reason, nil); err != nil {
+		if err := activities.UpdateTransactionStatus(ctx, p.paymentsClient, s.TransactionID, "timed_out", &reason, nil); err != nil {
 			logger.Error("failed to update transaction to timed_out", "error", err)
 			continue
 		}
 
 		// Transition to timed_out after the ledger update succeeds so retries can
 		// safely repair partial progress.
-		_, err := p.repo.UpdateSagaStatus(ctx, s.ID, StatusTimedOut, nil, s.CurrentStep)
+		_, err := p.repo.UpdateSagaStatus(ctx, s.ID, domain.StatusTimedOut, nil, s.CurrentStep)
 		if err != nil {
 			logger.Error("failed to transition saga to timed_out", "error", err)
 		}

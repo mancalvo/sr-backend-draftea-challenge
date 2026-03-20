@@ -1,4 +1,4 @@
-package saga
+package client
 
 import (
 	"bytes"

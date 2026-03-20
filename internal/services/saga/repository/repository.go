@@ -1,4 +1,4 @@
-package saga
+package repository
 
 import (
 	"context"
@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
 )
 
 // Sentinel errors returned by repository operations.
@@ -25,29 +28,29 @@ var (
 type Repository interface {
 	// CreateSaga inserts a new saga instance. Returns ErrDuplicateTransaction if
 	// a saga with the same transaction_id already exists.
-	CreateSaga(ctx context.Context, saga *SagaInstance) (*SagaInstance, error)
+	CreateSaga(ctx context.Context, saga *domain.SagaInstance) (*domain.SagaInstance, error)
 
 	// GetSagaByID returns a saga by its primary key, or ErrNotFound.
-	GetSagaByID(ctx context.Context, id string) (*SagaInstance, error)
+	GetSagaByID(ctx context.Context, id string) (*domain.SagaInstance, error)
 
 	// GetSagaByTransactionID returns a saga by its transaction_id, or ErrNotFound.
-	GetSagaByTransactionID(ctx context.Context, transactionID string) (*SagaInstance, error)
+	GetSagaByTransactionID(ctx context.Context, transactionID string) (*domain.SagaInstance, error)
 
 	// UpdateSagaStatus transitions a saga to a new status, validating the transition.
 	// Returns ErrNotFound or ErrIllegalTransition on failure.
-	UpdateSagaStatus(ctx context.Context, id string, status SagaStatus, outcome *SagaOutcome, currentStep *string) (*SagaInstance, error)
+	UpdateSagaStatus(ctx context.Context, id string, status domain.SagaStatus, outcome *domain.SagaOutcome, currentStep *string) (*domain.SagaInstance, error)
 
 	// ListTimedOutSagas returns sagas whose timeout_at has passed and are still
 	// actively executing.
-	ListTimedOutSagas(ctx context.Context, now time.Time) ([]SagaInstance, error)
+	ListTimedOutSagas(ctx context.Context, now time.Time) ([]domain.SagaInstance, error)
 
 	// SaveIdempotencyKey stores a key-response pair. Returns ErrIdempotencyKeyExists
 	// if the key already exists.
-	SaveIdempotencyKey(ctx context.Context, key *IdempotencyKey) error
+	SaveIdempotencyKey(ctx context.Context, key *domain.IdempotencyKey) error
 
 	// GetIdempotencyKey returns a stored key if it exists and has not expired,
 	// or ErrNotFound. The lookup is scoped by (scope, key).
-	GetIdempotencyKey(ctx context.Context, scope, key string) (*IdempotencyKey, error)
+	GetIdempotencyKey(ctx context.Context, scope, key string) (*domain.IdempotencyKey, error)
 }
 
 // ---- PostgresRepository ----
@@ -62,7 +65,7 @@ func NewPostgresRepository(db *sql.DB) *PostgresRepository {
 	return &PostgresRepository{db: db}
 }
 
-func (r *PostgresRepository) CreateSaga(ctx context.Context, saga *SagaInstance) (*SagaInstance, error) {
+func (r *PostgresRepository) CreateSaga(ctx context.Context, saga *domain.SagaInstance) (*domain.SagaInstance, error) {
 	if saga.ID == "" {
 		saga.ID = uuid.New().String()
 	}
@@ -86,7 +89,7 @@ func (r *PostgresRepository) CreateSaga(ctx context.Context, saga *SagaInstance)
 	return result, nil
 }
 
-func (r *PostgresRepository) GetSagaByID(ctx context.Context, id string) (*SagaInstance, error) {
+func (r *PostgresRepository) GetSagaByID(ctx context.Context, id string) (*domain.SagaInstance, error) {
 	const q = `SELECT id, transaction_id, type, status, outcome, current_step, payload, timeout_at, created_at, updated_at
 		FROM saga_orchestrator.saga_instances WHERE id = $1`
 	s, err := scanSaga(r.db.QueryRowContext(ctx, q, id))
@@ -99,7 +102,7 @@ func (r *PostgresRepository) GetSagaByID(ctx context.Context, id string) (*SagaI
 	return s, nil
 }
 
-func (r *PostgresRepository) GetSagaByTransactionID(ctx context.Context, transactionID string) (*SagaInstance, error) {
+func (r *PostgresRepository) GetSagaByTransactionID(ctx context.Context, transactionID string) (*domain.SagaInstance, error) {
 	const q = `SELECT id, transaction_id, type, status, outcome, current_step, payload, timeout_at, created_at, updated_at
 		FROM saga_orchestrator.saga_instances WHERE transaction_id = $1`
 	s, err := scanSaga(r.db.QueryRowContext(ctx, q, transactionID))
@@ -112,7 +115,7 @@ func (r *PostgresRepository) GetSagaByTransactionID(ctx context.Context, transac
 	return s, nil
 }
 
-func (r *PostgresRepository) UpdateSagaStatus(ctx context.Context, id string, status SagaStatus, outcome *SagaOutcome, currentStep *string) (*SagaInstance, error) {
+func (r *PostgresRepository) UpdateSagaStatus(ctx context.Context, id string, status domain.SagaStatus, outcome *domain.SagaOutcome, currentStep *string) (*domain.SagaInstance, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -121,7 +124,7 @@ func (r *PostgresRepository) UpdateSagaStatus(ctx context.Context, id string, st
 
 	// Read current status with row lock.
 	const selectQ = `SELECT status FROM saga_orchestrator.saga_instances WHERE id = $1 FOR UPDATE`
-	var currentStatus SagaStatus
+	var currentStatus domain.SagaStatus
 	if err := tx.QueryRowContext(ctx, selectQ, id).Scan(&currentStatus); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -129,7 +132,7 @@ func (r *PostgresRepository) UpdateSagaStatus(ctx context.Context, id string, st
 		return nil, fmt.Errorf("read saga status: %w", err)
 	}
 
-	if err := ValidateSagaTransition(currentStatus, status); err != nil {
+	if err := domain.ValidateSagaTransition(currentStatus, status); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrIllegalTransition, err)
 	}
 
@@ -150,7 +153,7 @@ func (r *PostgresRepository) UpdateSagaStatus(ctx context.Context, id string, st
 	return result, nil
 }
 
-func (r *PostgresRepository) ListTimedOutSagas(ctx context.Context, now time.Time) ([]SagaInstance, error) {
+func (r *PostgresRepository) ListTimedOutSagas(ctx context.Context, now time.Time) ([]domain.SagaInstance, error) {
 	const q = `SELECT id, transaction_id, type, status, outcome, current_step, payload, timeout_at, created_at, updated_at
 		FROM saga_orchestrator.saga_instances
 		WHERE timeout_at <= $1 AND status = 'running'
@@ -162,9 +165,9 @@ func (r *PostgresRepository) ListTimedOutSagas(ctx context.Context, now time.Tim
 	}
 	defer rows.Close()
 
-	var result []SagaInstance
+	var result []domain.SagaInstance
 	for rows.Next() {
-		var s SagaInstance
+		var s domain.SagaInstance
 		var outcome sql.NullString
 		var currentStep sql.NullString
 		var timeoutAt sql.NullTime
@@ -176,7 +179,7 @@ func (r *PostgresRepository) ListTimedOutSagas(ctx context.Context, now time.Tim
 			return nil, fmt.Errorf("scan saga: %w", err)
 		}
 		if outcome.Valid {
-			o := SagaOutcome(outcome.String)
+			o := domain.SagaOutcome(outcome.String)
 			s.Outcome = &o
 		}
 		if currentStep.Valid {
@@ -193,7 +196,7 @@ func (r *PostgresRepository) ListTimedOutSagas(ctx context.Context, now time.Tim
 	return result, nil
 }
 
-func (r *PostgresRepository) SaveIdempotencyKey(ctx context.Context, key *IdempotencyKey) error {
+func (r *PostgresRepository) SaveIdempotencyKey(ctx context.Context, key *domain.IdempotencyKey) error {
 	const q = `INSERT INTO saga_orchestrator.idempotency_keys
 		(scope, key, request_hash, transaction_id, response_status, response_body, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`
@@ -210,11 +213,11 @@ func (r *PostgresRepository) SaveIdempotencyKey(ctx context.Context, key *Idempo
 	return nil
 }
 
-func (r *PostgresRepository) GetIdempotencyKey(ctx context.Context, scope, key string) (*IdempotencyKey, error) {
+func (r *PostgresRepository) GetIdempotencyKey(ctx context.Context, scope, key string) (*domain.IdempotencyKey, error) {
 	const q = `SELECT scope, key, request_hash, transaction_id, response_status, response_body, created_at, expires_at
 		FROM saga_orchestrator.idempotency_keys
 		WHERE scope = $1 AND key = $2 AND expires_at > now()`
-	var ik IdempotencyKey
+	var ik domain.IdempotencyKey
 	var body sql.NullString
 	err := r.db.QueryRowContext(ctx, q, scope, key).Scan(
 		&ik.Scope, &ik.Key, &ik.RequestHash,
@@ -233,8 +236,8 @@ func (r *PostgresRepository) GetIdempotencyKey(ctx context.Context, scope, key s
 	return &ik, nil
 }
 
-func scanSaga(row *sql.Row) (*SagaInstance, error) {
-	var s SagaInstance
+func scanSaga(row *sql.Row) (*domain.SagaInstance, error) {
+	var s domain.SagaInstance
 	var outcome sql.NullString
 	var currentStep sql.NullString
 	var timeoutAt sql.NullTime
@@ -250,7 +253,7 @@ func scanSaga(row *sql.Row) (*SagaInstance, error) {
 		return nil, err
 	}
 	if outcome.Valid {
-		o := SagaOutcome(outcome.String)
+		o := domain.SagaOutcome(outcome.String)
 		s.Outcome = &o
 	}
 	if currentStep.Valid {
@@ -267,16 +270,7 @@ func isDuplicateKeyError(err error) bool {
 		return false
 	}
 	s := err.Error()
-	return containsStr(s, "23505") || containsStr(s, "unique_violation") || containsStr(s, "duplicate key")
-}
-
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(s, "23505") || strings.Contains(s, "unique_violation") || strings.Contains(s, "duplicate key")
 }
 
 // ---- In-memory repository for testing ----
@@ -284,21 +278,21 @@ func containsStr(s, substr string) bool {
 // MemoryRepository is an in-memory implementation of Repository for unit tests.
 type MemoryRepository struct {
 	mu              sync.RWMutex
-	sagas           map[string]*SagaInstance
+	sagas           map[string]*domain.SagaInstance
 	sagasByTxnID    map[string]string // transaction_id -> saga ID
-	idempotencyKeys map[string]*IdempotencyKey
+	idempotencyKeys map[string]*domain.IdempotencyKey
 }
 
 // NewMemoryRepository creates an empty in-memory repository.
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
-		sagas:           make(map[string]*SagaInstance),
+		sagas:           make(map[string]*domain.SagaInstance),
 		sagasByTxnID:    make(map[string]string),
-		idempotencyKeys: make(map[string]*IdempotencyKey),
+		idempotencyKeys: make(map[string]*domain.IdempotencyKey),
 	}
 }
 
-func (m *MemoryRepository) CreateSaga(_ context.Context, saga *SagaInstance) (*SagaInstance, error) {
+func (m *MemoryRepository) CreateSaga(_ context.Context, saga *domain.SagaInstance) (*domain.SagaInstance, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -312,7 +306,7 @@ func (m *MemoryRepository) CreateSaga(_ context.Context, saga *SagaInstance) (*S
 		stored.ID = uuid.New().String()
 	}
 	if stored.Status == "" {
-		stored.Status = StatusCreated
+		stored.Status = domain.StatusCreated
 	}
 	if stored.Payload == nil {
 		stored.Payload = json.RawMessage("{}")
@@ -327,7 +321,7 @@ func (m *MemoryRepository) CreateSaga(_ context.Context, saga *SagaInstance) (*S
 	return &result, nil
 }
 
-func (m *MemoryRepository) GetSagaByID(_ context.Context, id string) (*SagaInstance, error) {
+func (m *MemoryRepository) GetSagaByID(_ context.Context, id string) (*domain.SagaInstance, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -339,7 +333,7 @@ func (m *MemoryRepository) GetSagaByID(_ context.Context, id string) (*SagaInsta
 	return &result, nil
 }
 
-func (m *MemoryRepository) GetSagaByTransactionID(_ context.Context, transactionID string) (*SagaInstance, error) {
+func (m *MemoryRepository) GetSagaByTransactionID(_ context.Context, transactionID string) (*domain.SagaInstance, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -352,7 +346,7 @@ func (m *MemoryRepository) GetSagaByTransactionID(_ context.Context, transaction
 	return &result, nil
 }
 
-func (m *MemoryRepository) UpdateSagaStatus(_ context.Context, id string, status SagaStatus, outcome *SagaOutcome, currentStep *string) (*SagaInstance, error) {
+func (m *MemoryRepository) UpdateSagaStatus(_ context.Context, id string, status domain.SagaStatus, outcome *domain.SagaOutcome, currentStep *string) (*domain.SagaInstance, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -361,7 +355,7 @@ func (m *MemoryRepository) UpdateSagaStatus(_ context.Context, id string, status
 		return nil, ErrNotFound
 	}
 
-	if err := ValidateSagaTransition(s.Status, status); err != nil {
+	if err := domain.ValidateSagaTransition(s.Status, status); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrIllegalTransition, err)
 	}
 
@@ -374,13 +368,13 @@ func (m *MemoryRepository) UpdateSagaStatus(_ context.Context, id string, status
 	return &result, nil
 }
 
-func (m *MemoryRepository) ListTimedOutSagas(_ context.Context, now time.Time) ([]SagaInstance, error) {
+func (m *MemoryRepository) ListTimedOutSagas(_ context.Context, now time.Time) ([]domain.SagaInstance, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	var result []SagaInstance
+	var result []domain.SagaInstance
 	for _, s := range m.sagas {
-		if s.TimeoutAt != nil && !s.TimeoutAt.After(now) && s.Status == StatusRunning {
+		if s.TimeoutAt != nil && !s.TimeoutAt.After(now) && s.Status == domain.StatusRunning {
 			result = append(result, *s)
 		}
 	}
@@ -391,7 +385,7 @@ func idempotencyMapKey(scope, key string) string {
 	return scope + "\x00" + key
 }
 
-func (m *MemoryRepository) SaveIdempotencyKey(_ context.Context, key *IdempotencyKey) error {
+func (m *MemoryRepository) SaveIdempotencyKey(_ context.Context, key *domain.IdempotencyKey) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -408,7 +402,7 @@ func (m *MemoryRepository) SaveIdempotencyKey(_ context.Context, key *Idempotenc
 	return nil
 }
 
-func (m *MemoryRepository) GetIdempotencyKey(_ context.Context, scope, key string) (*IdempotencyKey, error) {
+func (m *MemoryRepository) GetIdempotencyKey(_ context.Context, scope, key string) (*domain.IdempotencyKey, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

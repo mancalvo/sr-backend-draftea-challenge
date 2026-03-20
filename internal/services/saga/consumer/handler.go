@@ -1,4 +1,4 @@
-package saga
+package consumer
 
 import (
 	"context"
@@ -9,25 +9,29 @@ import (
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/activities"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/workflows"
 )
 
-// ConsumerHandler dispatches incoming outcome events from the saga.outcomes
-// queue to the appropriate saga workflow handler.
-type ConsumerHandler struct {
-	repo           Repository
-	paymentsClient PaymentsClient
-	publisher      Publisher
+// Handler dispatches incoming outcome events from the saga.outcomes queue.
+type Handler struct {
+	repo           repository.Repository
+	paymentsClient client.PaymentsClient
+	publisher      activities.Publisher
 	logger         *slog.Logger
 }
 
-// NewConsumerHandler creates a new ConsumerHandler.
-func NewConsumerHandler(
-	repo Repository,
-	paymentsClient PaymentsClient,
-	publisher Publisher,
+// NewHandler creates a new consumer handler.
+func NewHandler(
+	repo repository.Repository,
+	paymentsClient client.PaymentsClient,
+	publisher activities.Publisher,
 	logger *slog.Logger,
-) *ConsumerHandler {
-	return &ConsumerHandler{
+) *Handler {
+	return &Handler{
 		repo:           repo,
 		paymentsClient: paymentsClient,
 		publisher:      publisher,
@@ -38,7 +42,7 @@ func NewConsumerHandler(
 // HandleOutcome routes an incoming outcome event to the appropriate handler
 // based on the event type. This is the main dispatch function used by the
 // consumer loop.
-func (c *ConsumerHandler) HandleOutcome(ctx context.Context, env messaging.Envelope) error {
+func (c *Handler) HandleOutcome(ctx context.Context, env messaging.Envelope) error {
 	logger := logging.With(c.logger,
 		slog.String(logging.KeyMessageID, env.MessageID),
 		slog.String(logging.KeyCorrelationID, env.CorrelationID),
@@ -71,7 +75,7 @@ func (c *ConsumerHandler) HandleOutcome(ctx context.Context, env messaging.Envel
 }
 
 // lookupSaga is a helper to find the saga instance for a given transaction ID.
-func (c *ConsumerHandler) lookupSaga(ctx context.Context, transactionID string, logger *slog.Logger) (*SagaInstance, error) {
+func (c *Handler) lookupSaga(ctx context.Context, transactionID string, logger *slog.Logger) (*domain.SagaInstance, error) {
 	saga, err := c.repo.GetSagaByTransactionID(ctx, transactionID)
 	if err != nil {
 		logger.Error("failed to lookup saga by transaction_id", "error", err, logging.KeyTransactionID, transactionID)
@@ -83,8 +87,8 @@ func (c *ConsumerHandler) lookupSaga(ctx context.Context, transactionID string, 
 // ---- Individual outcome handlers ----
 
 // decodePurchasePayload extracts PurchasePayload from a saga's stored payload.
-func decodePurchasePayload(s *SagaInstance) (*PurchasePayload, error) {
-	var p PurchasePayload
+func decodePurchasePayload(s *domain.SagaInstance) (*workflows.PurchasePayload, error) {
+	var p workflows.PurchasePayload
 	if err := json.Unmarshal(s.Payload, &p); err != nil {
 		return nil, fmt.Errorf("decode purchase payload: %w", err)
 	}
@@ -92,8 +96,8 @@ func decodePurchasePayload(s *SagaInstance) (*PurchasePayload, error) {
 }
 
 // decodeRefundPayload extracts RefundPayload from a saga's stored payload.
-func decodeRefundPayload(s *SagaInstance) (*RefundPayload, error) {
-	var p RefundPayload
+func decodeRefundPayload(s *domain.SagaInstance) (*workflows.RefundPayload, error) {
+	var p workflows.RefundPayload
 	if err := json.Unmarshal(s.Payload, &p); err != nil {
 		return nil, fmt.Errorf("decode refund payload: %w", err)
 	}
@@ -101,8 +105,8 @@ func decodeRefundPayload(s *SagaInstance) (*RefundPayload, error) {
 }
 
 // decodeDepositPayload extracts DepositPayload from a saga's stored payload.
-func decodeDepositPayload(s *SagaInstance) (*DepositPayload, error) {
-	var p DepositPayload
+func decodeDepositPayload(s *domain.SagaInstance) (*workflows.DepositPayload, error) {
+	var p workflows.DepositPayload
 	if err := json.Unmarshal(s.Payload, &p); err != nil {
 		return nil, fmt.Errorf("decode deposit payload: %w", err)
 	}
@@ -112,15 +116,15 @@ func decodeDepositPayload(s *SagaInstance) (*DepositPayload, error) {
 // isSagaTerminal returns true if the saga is already in a terminal state
 // (completed, failed, reconciliation_required). Used to handle duplicate
 // event redelivery gracefully.
-func isSagaTerminal(s *SagaInstance) bool {
+func isSagaTerminal(s *domain.SagaInstance) bool {
 	switch s.Status {
-	case StatusCompleted, StatusFailed, StatusReconciliationRequired:
+	case domain.StatusCompleted, domain.StatusFailed, domain.StatusReconciliationRequired:
 		return true
 	}
 	return false
 }
 
-func (c *ConsumerHandler) handleWalletDebited(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
+func (c *Handler) handleWalletDebited(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
 	var payload messaging.WalletDebited
 	if err := env.DecodePayload(&payload); err != nil {
 		return fmt.Errorf("decode wallet.debited payload: %w", err)
@@ -135,13 +139,13 @@ func (c *ConsumerHandler) handleWalletDebited(ctx context.Context, env messaging
 	logger.Info("received wallet.debited", "saga_id", s.ID, "saga_status", string(s.Status))
 
 	// Idempotent: if the saga already moved past this step, ignore.
-	if isSagaTerminal(s) || s.Status == StatusCompensating {
+	if isSagaTerminal(s) || s.Status == domain.StatusCompensating {
 		logger.Info("saga already past debit step, ignoring duplicate wallet.debited")
 		return nil
 	}
 
 	// Only purchase sagas proceed with access grant after debit.
-	if s.Type != SagaTypePurchase {
+	if s.Type != domain.SagaTypePurchase {
 		// Other workflow types (deposit) handle this event in their own tasks.
 		return nil
 	}
@@ -152,16 +156,11 @@ func (c *ConsumerHandler) handleWalletDebited(ctx context.Context, env messaging
 	}
 
 	// Publish access.grant.requested.
-	if err := c.publisher.Publish(ctx,
-		messaging.ExchangeCommands,
-		messaging.RoutingKeyAccessGrantRequested,
-		s.TransactionID,
-		messaging.AccessGrantRequested{
-			TransactionID: s.TransactionID,
-			UserID:        purchasePayload.UserID,
-			OfferingID:    purchasePayload.OfferingID,
-		},
-	); err != nil {
+	if err := activities.PublishAccessGrantRequested(ctx, c.publisher, s.TransactionID, messaging.AccessGrantRequested{
+		TransactionID: s.TransactionID,
+		UserID:        purchasePayload.UserID,
+		OfferingID:    purchasePayload.OfferingID,
+	}); err != nil {
 		return fmt.Errorf("publish access.grant.requested: %w", err)
 	}
 
@@ -169,7 +168,7 @@ func (c *ConsumerHandler) handleWalletDebited(ctx context.Context, env messaging
 	return nil
 }
 
-func (c *ConsumerHandler) handleWalletDebitRejected(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
+func (c *Handler) handleWalletDebitRejected(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
 	var payload messaging.WalletDebitRejected
 	if err := env.DecodePayload(&payload); err != nil {
 		return fmt.Errorf("decode wallet.debit.rejected payload: %w", err)
@@ -189,21 +188,21 @@ func (c *ConsumerHandler) handleWalletDebitRejected(ctx context.Context, env mes
 		return nil
 	}
 
-	if s.Type != SagaTypePurchase {
+	if s.Type != domain.SagaTypePurchase {
 		return nil
 	}
 
 	// Insufficient funds -> fail the saga and the transaction.
 	reason := fmt.Sprintf("wallet debit rejected: %s", payload.Reason)
-	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason, nil); err != nil {
+	if err := activities.UpdateTransactionStatus(ctx, c.paymentsClient, s.TransactionID, "failed", &reason, nil); err != nil {
 		logger.Error("failed to update transaction to failed", "error", err)
 		return fmt.Errorf("update transaction status to failed: %w", err)
 	}
 
-	outcome := OutcomeFailed
-	step := "purchase_debit_rejected"
-	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusFailed, &outcome, &step); err != nil {
-		if errors.Is(err, ErrIllegalTransition) {
+	outcome := domain.OutcomeFailed
+	step := workflows.PurchaseDebitRejectedStep
+	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, domain.StatusFailed, &outcome, &step); err != nil {
+		if errors.Is(err, repository.ErrIllegalTransition) {
 			logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
 			return nil
 		}
@@ -214,7 +213,7 @@ func (c *ConsumerHandler) handleWalletDebitRejected(ctx context.Context, env mes
 	return nil
 }
 
-func (c *ConsumerHandler) handleWalletCredited(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
+func (c *Handler) handleWalletCredited(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
 	var payload messaging.WalletCredited
 	if err := env.DecodePayload(&payload); err != nil {
 		return fmt.Errorf("decode wallet.credited payload: %w", err)
@@ -235,17 +234,17 @@ func (c *ConsumerHandler) handleWalletCredited(ctx context.Context, env messagin
 	}
 
 	// For purchase sagas in compensating status: credit completes the compensation.
-	if s.Type == SagaTypePurchase && s.Status == StatusCompensating {
+	if s.Type == domain.SagaTypePurchase && s.Status == domain.StatusCompensating {
 		reason := "access grant conflicted, debit reversed"
-		if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "compensated", &reason, nil); err != nil {
+		if err := activities.UpdateTransactionStatus(ctx, c.paymentsClient, s.TransactionID, "compensated", &reason, nil); err != nil {
 			logger.Error("failed to update transaction to compensated", "error", err)
 			return fmt.Errorf("update transaction status to compensated: %w", err)
 		}
 
-		outcome := OutcomeCompensated
-		step := "purchase_compensation_credited"
-		if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusCompleted, &outcome, &step); err != nil {
-			if errors.Is(err, ErrIllegalTransition) {
+		outcome := domain.OutcomeCompensated
+		step := workflows.PurchaseCompensationCreditedStep
+		if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, domain.StatusCompleted, &outcome, &step); err != nil {
+			if errors.Is(err, repository.ErrIllegalTransition) {
 				logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
 				return nil
 			}
@@ -258,16 +257,16 @@ func (c *ConsumerHandler) handleWalletCredited(ctx context.Context, env messagin
 
 	// For deposit sagas: credit completes the deposit successfully.
 	// Valid from both running (normal flow) and timed_out (late provider success).
-	if s.Type == SagaTypeDeposit && (s.Status == StatusRunning || s.Status == StatusTimedOut) {
-		if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil, nil); err != nil {
+	if s.Type == domain.SagaTypeDeposit && (s.Status == domain.StatusRunning || s.Status == domain.StatusTimedOut) {
+		if err := activities.UpdateTransactionStatus(ctx, c.paymentsClient, s.TransactionID, "completed", nil, nil); err != nil {
 			logger.Error("failed to update transaction to completed", "error", err)
 			return fmt.Errorf("update transaction status to completed: %w", err)
 		}
 
-		outcome := OutcomeSucceeded
-		step := "deposit_completed"
-		if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusCompleted, &outcome, &step); err != nil {
-			if errors.Is(err, ErrIllegalTransition) {
+		outcome := domain.OutcomeSucceeded
+		step := workflows.DepositCompletedStep
+		if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, domain.StatusCompleted, &outcome, &step); err != nil {
+			if errors.Is(err, repository.ErrIllegalTransition) {
 				logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
 				return nil
 			}
@@ -279,16 +278,16 @@ func (c *ConsumerHandler) handleWalletCredited(ctx context.Context, env messagin
 	}
 
 	// For refund sagas in running status: credit completes the refund successfully.
-	if s.Type == SagaTypeRefund && s.Status == StatusRunning {
-		if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil, nil); err != nil {
+	if s.Type == domain.SagaTypeRefund && s.Status == domain.StatusRunning {
+		if err := activities.UpdateTransactionStatus(ctx, c.paymentsClient, s.TransactionID, "completed", nil, nil); err != nil {
 			logger.Error("failed to update transaction to completed", "error", err)
 			return fmt.Errorf("update transaction status to completed: %w", err)
 		}
 
-		outcome := OutcomeSucceeded
-		step := "refund_completed"
-		if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusCompleted, &outcome, &step); err != nil {
-			if errors.Is(err, ErrIllegalTransition) {
+		outcome := domain.OutcomeSucceeded
+		step := workflows.RefundCompletedStep
+		if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, domain.StatusCompleted, &outcome, &step); err != nil {
+			if errors.Is(err, repository.ErrIllegalTransition) {
 				logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
 				return nil
 			}
@@ -302,7 +301,7 @@ func (c *ConsumerHandler) handleWalletCredited(ctx context.Context, env messagin
 	return nil
 }
 
-func (c *ConsumerHandler) handleAccessGranted(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
+func (c *Handler) handleAccessGranted(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
 	var payload messaging.AccessGranted
 	if err := env.DecodePayload(&payload); err != nil {
 		return fmt.Errorf("decode access.granted payload: %w", err)
@@ -322,20 +321,20 @@ func (c *ConsumerHandler) handleAccessGranted(ctx context.Context, env messaging
 		return nil
 	}
 
-	if s.Type != SagaTypePurchase {
+	if s.Type != domain.SagaTypePurchase {
 		return nil
 	}
 
 	// Access granted -> purchase completed successfully.
-	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil, nil); err != nil {
+	if err := activities.UpdateTransactionStatus(ctx, c.paymentsClient, s.TransactionID, "completed", nil, nil); err != nil {
 		logger.Error("failed to update transaction to completed", "error", err)
 		return fmt.Errorf("update transaction status to completed: %w", err)
 	}
 
-	outcome := OutcomeSucceeded
-	step := "purchase_completed"
-	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusCompleted, &outcome, &step); err != nil {
-		if errors.Is(err, ErrIllegalTransition) {
+	outcome := domain.OutcomeSucceeded
+	step := workflows.PurchaseCompletedStep
+	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, domain.StatusCompleted, &outcome, &step); err != nil {
+		if errors.Is(err, repository.ErrIllegalTransition) {
 			logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
 			return nil
 		}
@@ -346,7 +345,7 @@ func (c *ConsumerHandler) handleAccessGranted(ctx context.Context, env messaging
 	return nil
 }
 
-func (c *ConsumerHandler) handleAccessGrantConflicted(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
+func (c *Handler) handleAccessGrantConflicted(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
 	var payload messaging.AccessGrantConflicted
 	if err := env.DecodePayload(&payload); err != nil {
 		return fmt.Errorf("decode access.grant.conflicted payload: %w", err)
@@ -361,12 +360,12 @@ func (c *ConsumerHandler) handleAccessGrantConflicted(ctx context.Context, env m
 	logger.Info("received access.grant.conflicted", "saga_id", s.ID, "reason", payload.Reason)
 
 	// Idempotent: already terminal or compensating, nothing to do.
-	if isSagaTerminal(s) || s.Status == StatusCompensating {
+	if isSagaTerminal(s) || s.Status == domain.StatusCompensating {
 		logger.Info("saga already past grant step, ignoring duplicate access.grant.conflicted")
 		return nil
 	}
 
-	if s.Type != SagaTypePurchase {
+	if s.Type != domain.SagaTypePurchase {
 		return nil
 	}
 
@@ -376,27 +375,22 @@ func (c *ConsumerHandler) handleAccessGrantConflicted(ctx context.Context, env m
 	}
 
 	// Access grant conflicted after debit -> compensate by crediting wallet.
-	step := "purchase_compensation_credit"
-	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusCompensating, nil, &step); err != nil {
-		if errors.Is(err, ErrIllegalTransition) {
+	step := workflows.PurchaseCompensationCreditStep
+	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, domain.StatusCompensating, nil, &step); err != nil {
+		if errors.Is(err, repository.ErrIllegalTransition) {
 			logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
 			return nil
 		}
 		return fmt.Errorf("update saga to compensating: %w", err)
 	}
 
-	if err := c.publisher.Publish(ctx,
-		messaging.ExchangeCommands,
-		messaging.RoutingKeyWalletCreditRequested,
-		s.TransactionID,
-		messaging.WalletCreditRequested{
-			TransactionID: s.TransactionID,
-			UserID:        purchasePayload.UserID,
-			Amount:        purchasePayload.Amount,
-			Currency:      purchasePayload.Currency,
-			SourceStep:    "purchase_compensation",
-		},
-	); err != nil {
+	if err := activities.PublishWalletCreditRequested(ctx, c.publisher, s.TransactionID, messaging.WalletCreditRequested{
+		TransactionID: s.TransactionID,
+		UserID:        purchasePayload.UserID,
+		Amount:        purchasePayload.Amount,
+		Currency:      purchasePayload.Currency,
+		SourceStep:    "purchase_compensation",
+	}); err != nil {
 		return fmt.Errorf("publish wallet.credit.requested for compensation: %w", err)
 	}
 
@@ -404,7 +398,7 @@ func (c *ConsumerHandler) handleAccessGrantConflicted(ctx context.Context, env m
 	return nil
 }
 
-func (c *ConsumerHandler) handleAccessRevoked(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
+func (c *Handler) handleAccessRevoked(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
 	var payload messaging.AccessRevoked
 	if err := env.DecodePayload(&payload); err != nil {
 		return fmt.Errorf("decode access.revoked payload: %w", err)
@@ -432,7 +426,7 @@ func (c *ConsumerHandler) handleAccessRevoked(ctx context.Context, env messaging
 		return nil
 	}
 
-	if s.Type != SagaTypeRefund {
+	if s.Type != domain.SagaTypeRefund {
 		return nil
 	}
 
@@ -443,18 +437,13 @@ func (c *ConsumerHandler) handleAccessRevoked(ctx context.Context, env messaging
 
 	// Access revoked successfully -> publish wallet.credit.requested to refund the user.
 	// The saga stays at StatusRunning; final step update occurs when the saga completes.
-	if err := c.publisher.Publish(ctx,
-		messaging.ExchangeCommands,
-		messaging.RoutingKeyWalletCreditRequested,
-		s.TransactionID,
-		messaging.WalletCreditRequested{
-			TransactionID: s.TransactionID,
-			UserID:        refundPayload.UserID,
-			Amount:        refundPayload.Amount,
-			Currency:      refundPayload.Currency,
-			SourceStep:    "refund_credit",
-		},
-	); err != nil {
+	if err := activities.PublishWalletCreditRequested(ctx, c.publisher, s.TransactionID, messaging.WalletCreditRequested{
+		TransactionID: s.TransactionID,
+		UserID:        refundPayload.UserID,
+		Amount:        refundPayload.Amount,
+		Currency:      refundPayload.Currency,
+		SourceStep:    workflows.RefundCreditStep,
+	}); err != nil {
 		return fmt.Errorf("publish wallet.credit.requested for refund: %w", err)
 	}
 
@@ -462,7 +451,7 @@ func (c *ConsumerHandler) handleAccessRevoked(ctx context.Context, env messaging
 	return nil
 }
 
-func (c *ConsumerHandler) handleAccessRevokeRejected(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
+func (c *Handler) handleAccessRevokeRejected(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
 	var payload messaging.AccessRevokeRejected
 	if err := env.DecodePayload(&payload); err != nil {
 		return fmt.Errorf("decode access.revoke.rejected payload: %w", err)
@@ -488,22 +477,22 @@ func (c *ConsumerHandler) handleAccessRevokeRejected(ctx context.Context, env me
 		return nil
 	}
 
-	if s.Type != SagaTypeRefund {
+	if s.Type != domain.SagaTypeRefund {
 		return nil
 	}
 
 	// Revoke rejected (access already inactive) -> fail the saga and the transaction.
 	// Do not credit the wallet since revoke did not succeed.
 	reason := fmt.Sprintf("access revoke rejected: %s", payload.Reason)
-	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason, nil); err != nil {
+	if err := activities.UpdateTransactionStatus(ctx, c.paymentsClient, s.TransactionID, "failed", &reason, nil); err != nil {
 		logger.Error("failed to update transaction to failed", "error", err)
 		return fmt.Errorf("update transaction status to failed: %w", err)
 	}
 
-	outcome := OutcomeFailed
-	step := "refund_revoke_rejected"
-	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusFailed, &outcome, &step); err != nil {
-		if errors.Is(err, ErrIllegalTransition) {
+	outcome := domain.OutcomeFailed
+	step := workflows.RefundRevokeRejectedStep
+	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, domain.StatusFailed, &outcome, &step); err != nil {
+		if errors.Is(err, repository.ErrIllegalTransition) {
 			logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
 			return nil
 		}
@@ -514,7 +503,7 @@ func (c *ConsumerHandler) handleAccessRevokeRejected(ctx context.Context, env me
 	return nil
 }
 
-func (c *ConsumerHandler) handleProviderChargeSucceeded(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
+func (c *Handler) handleProviderChargeSucceeded(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
 	var payload messaging.ProviderChargeSucceeded
 	if err := env.DecodePayload(&payload); err != nil {
 		return fmt.Errorf("decode provider.charge.succeeded payload: %w", err)
@@ -534,7 +523,7 @@ func (c *ConsumerHandler) handleProviderChargeSucceeded(ctx context.Context, env
 		return nil
 	}
 
-	if s.Type != SagaTypeDeposit {
+	if s.Type != domain.SagaTypeDeposit {
 		return nil
 	}
 
@@ -544,18 +533,18 @@ func (c *ConsumerHandler) handleProviderChargeSucceeded(ctx context.Context, env
 	}
 
 	transactionStatus := "pending"
-	if s.Status == StatusTimedOut {
+	if s.Status == domain.StatusTimedOut {
 		transactionStatus = "timed_out"
 	}
-	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, transactionStatus, nil, &payload.ProviderRef); err != nil {
+	if err := activities.UpdateTransactionStatus(ctx, c.paymentsClient, s.TransactionID, transactionStatus, nil, &payload.ProviderRef); err != nil {
 		logger.Error("failed to record provider reference", "error", err)
 		return fmt.Errorf("record provider reference: %w", err)
 	}
 
 	// Provider charge succeeded -> publish wallet.credit.requested.
 	// For timed_out sagas, a late success can still legally complete the deposit.
-	step := "deposit_credit"
-	if s.Status == StatusTimedOut {
+	step := workflows.DepositCreditStep
+	if s.Status == domain.StatusTimedOut {
 		// Resume from timed_out: transition back to running is not legal,
 		// so we go directly to completed after the credit arrives.
 		// For now, just publish the credit command; the wallet.credited handler
@@ -563,18 +552,13 @@ func (c *ConsumerHandler) handleProviderChargeSucceeded(ctx context.Context, env
 		logger.Info("late provider success on timed_out saga, publishing wallet credit", "saga_id", s.ID)
 	}
 
-	if err := c.publisher.Publish(ctx,
-		messaging.ExchangeCommands,
-		messaging.RoutingKeyWalletCreditRequested,
-		s.TransactionID,
-		messaging.WalletCreditRequested{
-			TransactionID: s.TransactionID,
-			UserID:        depositPayload.UserID,
-			Amount:        depositPayload.Amount,
-			Currency:      depositPayload.Currency,
-			SourceStep:    step,
-		},
-	); err != nil {
+	if err := activities.PublishWalletCreditRequested(ctx, c.publisher, s.TransactionID, messaging.WalletCreditRequested{
+		TransactionID: s.TransactionID,
+		UserID:        depositPayload.UserID,
+		Amount:        depositPayload.Amount,
+		Currency:      depositPayload.Currency,
+		SourceStep:    step,
+	}); err != nil {
 		return fmt.Errorf("publish wallet.credit.requested for deposit: %w", err)
 	}
 
@@ -582,7 +566,7 @@ func (c *ConsumerHandler) handleProviderChargeSucceeded(ctx context.Context, env
 	return nil
 }
 
-func (c *ConsumerHandler) handleProviderChargeFailed(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
+func (c *Handler) handleProviderChargeFailed(ctx context.Context, env messaging.Envelope, logger *slog.Logger) error {
 	var payload messaging.ProviderChargeFailed
 	if err := env.DecodePayload(&payload); err != nil {
 		return fmt.Errorf("decode provider.charge.failed payload: %w", err)
@@ -602,22 +586,22 @@ func (c *ConsumerHandler) handleProviderChargeFailed(ctx context.Context, env me
 		return nil
 	}
 
-	if s.Type != SagaTypeDeposit {
+	if s.Type != domain.SagaTypeDeposit {
 		return nil
 	}
 
 	// Provider charge failed -> fail the saga and the transaction.
 	// This is valid from both running and timed_out statuses.
 	reason := fmt.Sprintf("provider charge failed: %s", payload.Reason)
-	if err := c.paymentsClient.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason, nil); err != nil {
+	if err := activities.UpdateTransactionStatus(ctx, c.paymentsClient, s.TransactionID, "failed", &reason, nil); err != nil {
 		logger.Error("failed to update transaction to failed", "error", err)
 		return fmt.Errorf("update transaction status to failed: %w", err)
 	}
 
-	outcome := OutcomeFailed
-	step := "deposit_charge_failed"
-	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, StatusFailed, &outcome, &step); err != nil {
-		if errors.Is(err, ErrIllegalTransition) {
+	outcome := domain.OutcomeFailed
+	step := workflows.DepositChargeFailedStep
+	if _, err := c.repo.UpdateSagaStatus(ctx, s.ID, domain.StatusFailed, &outcome, &step); err != nil {
+		if errors.Is(err, repository.ErrIllegalTransition) {
 			logger.Warn("saga transition rejected, ignoring duplicate", "error", err)
 			return nil
 		}

@@ -1,10 +1,6 @@
-// Package saga implements the saga-orchestrator service: command ingress,
-// idempotency, saga state persistence, and workflow engine behavior.
-package saga
+package domain
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -60,7 +56,6 @@ const (
 	OutcomeCompensated SagaOutcome = "compensated"
 )
 
-// legalSagaTransitions defines the allowed state transitions for the saga state machine.
 var legalSagaTransitions = map[SagaStatus]map[SagaStatus]bool{
 	StatusCreated: {
 		StatusRunning: true,
@@ -111,9 +106,7 @@ type SagaInstance struct {
 	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
-// IdempotencyKey stores the result of a previously accepted command so that
-// duplicate requests receive the same response. The uniqueness constraint is
-// on (Scope, Key). RequestHash is used to detect payload mismatches.
+// IdempotencyKey stores the result of a previously accepted command.
 type IdempotencyKey struct {
 	Key            string          `json:"key"`
 	Scope          string          `json:"scope"`
@@ -123,72 +116,4 @@ type IdempotencyKey struct {
 	ResponseBody   json.RawMessage `json:"response_body,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 	ExpiresAt      time.Time       `json:"expires_at"`
-}
-
-// RequestFingerprint computes a SHA-256 hex digest of the canonical JSON
-// representation of a validated command struct. The struct is marshalled with
-// Go's encoding/json (sorted keys), producing a stable fingerprint that is
-// insensitive to whitespace, field ordering, or default-value differences in
-// the raw request body.
-func RequestFingerprint(cmd any) string {
-	b, _ := json.Marshal(cmd)
-	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:])
-}
-
-// ---- Command ingress request types ----
-
-// DepositCommand is the request body for POST /deposits.
-type DepositCommand struct {
-	UserID         string `json:"user_id"`
-	Amount         int64  `json:"amount"`
-	Currency       string `json:"currency"`
-	IdempotencyKey string `json:"idempotency_key"`
-}
-
-// PurchaseCommand is the request body for POST /purchases.
-type PurchaseCommand struct {
-	UserID         string `json:"user_id"`
-	OfferingID     string `json:"offering_id"`
-	IdempotencyKey string `json:"idempotency_key"`
-}
-
-// RefundCommand is the request body for POST /refunds.
-type RefundCommand struct {
-	UserID         string `json:"user_id"`
-	OfferingID     string `json:"offering_id"`
-	TransactionID  string `json:"transaction_id"` // original purchase transaction
-	IdempotencyKey string `json:"idempotency_key"`
-}
-
-// CommandAcceptedResponse is the response body for a successfully accepted command (202).
-type CommandAcceptedResponse struct {
-	TransactionID string `json:"transaction_id"`
-	Status        string `json:"status"`
-}
-
-// ---- Saga payload types (stored in saga_instances.payload) ----
-
-// DepositPayload is the JSONB payload stored in a deposit saga.
-type DepositPayload struct {
-	UserID   string `json:"user_id"`
-	Amount   int64  `json:"amount"`
-	Currency string `json:"currency"`
-}
-
-// PurchasePayload is the JSONB payload stored in a purchase saga.
-type PurchasePayload struct {
-	UserID     string `json:"user_id"`
-	OfferingID string `json:"offering_id"`
-	Amount     int64  `json:"amount"`
-	Currency   string `json:"currency"`
-}
-
-// RefundPayload is the JSONB payload stored in a refund saga.
-type RefundPayload struct {
-	UserID              string `json:"user_id"`
-	OfferingID          string `json:"offering_id"`
-	OriginalTransaction string `json:"original_transaction"`
-	Amount              int64  `json:"amount"`
-	Currency            string `json:"currency"`
 }
