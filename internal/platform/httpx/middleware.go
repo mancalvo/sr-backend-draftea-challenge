@@ -34,6 +34,7 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			)
 
 			ctx := logging.WithContext(r.Context(), reqLogger)
+			ctx = logging.WithCorrelationID(ctx, correlationID)
 			rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
 			next.ServeHTTP(rw, r.WithContext(ctx))

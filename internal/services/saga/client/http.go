@@ -8,6 +8,9 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 )
 
 // CatalogClient makes synchronous HTTP calls to the catalog-access service
@@ -103,6 +106,7 @@ func (c *HTTPCatalogClient) PurchasePrecheck(ctx context.Context, userID, offeri
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	propagateCorrelationID(req)
 
 	return c.doPrecheck(req)
 }
@@ -122,6 +126,7 @@ func (c *HTTPCatalogClient) RefundPrecheck(ctx context.Context, userID, offering
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	propagateCorrelationID(req)
 
 	return c.doPrecheck(req)
 }
@@ -175,6 +180,7 @@ func (c *HTTPPaymentsClient) RegisterTransaction(ctx context.Context, req Regist
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	propagateCorrelationID(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -203,6 +209,7 @@ func (c *HTTPPaymentsClient) GetTransaction(ctx context.Context, transactionID s
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+	propagateCorrelationID(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -247,6 +254,7 @@ func (c *HTTPPaymentsClient) UpdateTransactionStatus(ctx context.Context, transa
 		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	propagateCorrelationID(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -260,4 +268,10 @@ func (c *HTTPPaymentsClient) UpdateTransactionStatus(ctx context.Context, transa
 	}
 
 	return nil
+}
+
+func propagateCorrelationID(req *http.Request) {
+	if correlationID := logging.CorrelationIDFromContext(req.Context()); correlationID != "" {
+		req.Header.Set(httpx.HeaderCorrelationID, correlationID)
+	}
 }

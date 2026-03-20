@@ -12,6 +12,7 @@ import (
 )
 
 type ctxKey struct{}
+type correlationIDKey struct{}
 
 // New creates a new structured JSON logger for the given service name.
 func New(service string) *slog.Logger {
@@ -26,6 +27,11 @@ func WithContext(ctx context.Context, logger *slog.Logger) context.Context {
 	return context.WithValue(ctx, ctxKey{}, logger)
 }
 
+// WithCorrelationID returns a new context carrying the given correlation ID.
+func WithCorrelationID(ctx context.Context, correlationID string) context.Context {
+	return context.WithValue(ctx, correlationIDKey{}, correlationID)
+}
+
 // FromContext extracts the logger from the context, falling back to a default
 // logger if none is present.
 func FromContext(ctx context.Context) *slog.Logger {
@@ -33,6 +39,14 @@ func FromContext(ctx context.Context) *slog.Logger {
 		return l
 	}
 	return slog.Default()
+}
+
+// CorrelationIDFromContext extracts the correlation ID carried in the context.
+func CorrelationIDFromContext(ctx context.Context) string {
+	if correlationID, ok := ctx.Value(correlationIDKey{}).(string); ok {
+		return correlationID
+	}
+	return ""
 }
 
 // With returns a child logger with additional structured attributes.
