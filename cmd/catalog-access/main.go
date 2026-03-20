@@ -3,13 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
-	"os/signal"
-	"sync"
-	"syscall"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -18,6 +14,7 @@ import (
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/config"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/database"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/health"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/lifecycle"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/rabbitmq"
@@ -111,54 +108,18 @@ func main() {
 		WriteTimeout: 10 * time.Second,
 	}
 
-	// Graceful shutdown context
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Signal handling
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
-	var wg sync.WaitGroup
-
-	// Start AMQP consumer in background
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := consumer.Consume(ctx, messaging.QueueCatalogAccessCommands, amqpHandler.Handle); err != nil && ctx.Err() == nil {
-			logger.Error("consumer stopped unexpectedly", "error", err)
-			cancel()
-		}
-	}()
-
-	// Start HTTP server in background
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		logger.Info("catalog-access HTTP server starting", "port", port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("HTTP server error", "error", err)
-			cancel()
-		}
-	}()
-
-	// Wait for shutdown signal
-	select {
-	case sig := <-sigCh:
-		logger.Info("received signal, shutting down", "signal", sig)
-	case <-ctx.Done():
+	if err := lifecycle.Run(lifecycle.Config{
+		ServiceName: "catalog-access",
+		Port:        port,
+		Logger:      logger,
+		Server:      srv,
+	}, lifecycle.Task{
+		Name: "consumer",
+		Run: func(ctx context.Context) error {
+			return consumer.Consume(ctx, messaging.QueueCatalogAccessCommands, amqpHandler.Handle)
+		},
+	}); err != nil {
+		logger.Error("service lifecycle failed", "error", err)
+		os.Exit(1)
 	}
-
-	cancel()
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
-	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
-		logger.Error("HTTP server shutdown error", "error", err)
-	}
-	wg.Wait()
-
-	logger.Info("catalog-access stopped")
 }
