@@ -155,6 +155,31 @@ func TestMemoryRepo_Debit_Idempotent(t *testing.T) {
 	}
 }
 
+func TestMemoryRepo_Debit_IdempotentReturnsOriginalBalanceAfter(t *testing.T) {
+	repo := seedRepo(10000)
+	ctx := context.Background()
+
+	first, err := repo.Debit(ctx, "user-1", "txn-1", "purchase_debit", 3000)
+	if err != nil {
+		t.Fatalf("first debit: %v", err)
+	}
+	if _, err := repo.Credit(ctx, "user-1", "txn-2", "deposit_credit", 1500); err != nil {
+		t.Fatalf("credit after debit: %v", err)
+	}
+
+	duplicate, err := repo.Debit(ctx, "user-1", "txn-1", "purchase_debit", 3000)
+	if err != nil {
+		t.Fatalf("duplicate debit: %v", err)
+	}
+
+	if duplicate.Movement.BalanceAfter != first.Movement.BalanceAfter {
+		t.Fatalf("movement balance_after = %d, want %d", duplicate.Movement.BalanceAfter, first.Movement.BalanceAfter)
+	}
+	if duplicate.Wallet.Balance != first.Movement.BalanceAfter {
+		t.Fatalf("wallet balance = %d, want %d", duplicate.Wallet.Balance, first.Movement.BalanceAfter)
+	}
+}
+
 func TestMemoryRepo_Debit_DifferentSourceSteps(t *testing.T) {
 	repo := seedRepo(10000)
 	ctx := context.Background()
@@ -246,6 +271,31 @@ func TestMemoryRepo_Credit_Idempotent(t *testing.T) {
 
 	if len(repo.Movements) != 1 {
 		t.Errorf("expected 1 movement, got %d", len(repo.Movements))
+	}
+}
+
+func TestMemoryRepo_Credit_IdempotentReturnsOriginalBalanceAfter(t *testing.T) {
+	repo := seedRepo(5000)
+	ctx := context.Background()
+
+	first, err := repo.Credit(ctx, "user-1", "txn-1", "deposit_credit", 3000)
+	if err != nil {
+		t.Fatalf("first credit: %v", err)
+	}
+	if _, err := repo.Debit(ctx, "user-1", "txn-2", "purchase_debit", 1000); err != nil {
+		t.Fatalf("debit after credit: %v", err)
+	}
+
+	duplicate, err := repo.Credit(ctx, "user-1", "txn-1", "deposit_credit", 3000)
+	if err != nil {
+		t.Fatalf("duplicate credit: %v", err)
+	}
+
+	if duplicate.Movement.BalanceAfter != first.Movement.BalanceAfter {
+		t.Fatalf("movement balance_after = %d, want %d", duplicate.Movement.BalanceAfter, first.Movement.BalanceAfter)
+	}
+	if duplicate.Wallet.Balance != first.Movement.BalanceAfter {
+		t.Fatalf("wallet balance = %d, want %d", duplicate.Wallet.Balance, first.Movement.BalanceAfter)
 	}
 }
 

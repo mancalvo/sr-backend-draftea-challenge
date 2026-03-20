@@ -112,6 +112,36 @@ func TestMemoryRepo_GrantAccess_AfterRevoke(t *testing.T) {
 	}
 }
 
+func TestMemoryRepo_GrantAccess_DuplicateTransactionAfterRevoke(t *testing.T) {
+	repo := seedRepo(false)
+	ctx := context.Background()
+
+	granted, err := repo.GrantAccess(ctx, "user-1", "offering-1", "txn-1")
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := repo.RevokeAccess(ctx, "txn-1"); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	duplicate, err := repo.GrantAccess(ctx, "user-1", "offering-1", "txn-1")
+	if !errors.Is(err, ErrDuplicateGrant) {
+		t.Fatalf("expected ErrDuplicateGrant, got %v", err)
+	}
+	if duplicate == nil {
+		t.Fatal("expected existing access record on duplicate grant")
+	}
+	if duplicate.ID != granted.ID {
+		t.Fatalf("duplicate record id = %q, want %q", duplicate.ID, granted.ID)
+	}
+	if duplicate.Status != AccessStatusRevoked {
+		t.Fatalf("duplicate record status = %q, want %q", duplicate.Status, AccessStatusRevoked)
+	}
+	if len(repo.AccessRecords) != 1 {
+		t.Fatalf("access record count = %d, want 1", len(repo.AccessRecords))
+	}
+}
+
 func TestMemoryRepo_RevokeAccess_InactiveRejected(t *testing.T) {
 	repo := seedRepo(false)
 	ctx := context.Background()

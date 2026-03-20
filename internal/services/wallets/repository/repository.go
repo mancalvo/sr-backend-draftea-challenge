@@ -101,6 +101,7 @@ func (r *PostgresRepository) Debit(ctx context.Context, userID, transactionID, s
 		return nil, err
 	}
 	if existing != nil {
+		w.Balance = existing.BalanceAfter
 		return &DebitResult{Movement: existing, Wallet: &w}, nil
 	}
 
@@ -127,6 +128,14 @@ func (r *PostgresRepository) Debit(ctx context.Context, userID, transactionID, s
 	)
 	if err != nil {
 		if platformdatabase.IsUniqueViolation(err) {
+			existing, findErr := r.findExistingMovement(ctx, tx, transactionID, sourceStep)
+			if findErr != nil {
+				return nil, findErr
+			}
+			if existing != nil {
+				w.Balance = existing.BalanceAfter
+				return &DebitResult{Movement: existing, Wallet: &w}, nil
+			}
 			return nil, ErrDuplicateMovement
 		}
 		return nil, fmt.Errorf("insert movement: %w", err)
@@ -165,6 +174,7 @@ func (r *PostgresRepository) Credit(ctx context.Context, userID, transactionID, 
 		return nil, err
 	}
 	if existing != nil {
+		w.Balance = existing.BalanceAfter
 		return &CreditResult{Movement: existing, Wallet: &w}, nil
 	}
 
@@ -187,6 +197,14 @@ func (r *PostgresRepository) Credit(ctx context.Context, userID, transactionID, 
 	)
 	if err != nil {
 		if platformdatabase.IsUniqueViolation(err) {
+			existing, findErr := r.findExistingMovement(ctx, tx, transactionID, sourceStep)
+			if findErr != nil {
+				return nil, findErr
+			}
+			if existing != nil {
+				w.Balance = existing.BalanceAfter
+				return &CreditResult{Movement: existing, Wallet: &w}, nil
+			}
 			return nil, ErrDuplicateMovement
 		}
 		return nil, fmt.Errorf("insert movement: %w", err)
@@ -272,6 +290,7 @@ func (m *MemoryRepository) Debit(_ context.Context, userID, transactionID, sourc
 	if idx, ok := m.movIndex[dedupeKey]; ok {
 		mv := *m.Movements[idx]
 		w := *m.Wallets[userID]
+		w.Balance = mv.BalanceAfter
 		return &DebitResult{Movement: &mv, Wallet: &w}, nil
 	}
 
@@ -318,6 +337,7 @@ func (m *MemoryRepository) Credit(_ context.Context, userID, transactionID, sour
 	if idx, ok := m.movIndex[dedupeKey]; ok {
 		mv := *m.Movements[idx]
 		w := *m.Wallets[userID]
+		w.Balance = mv.BalanceAfter
 		return &CreditResult{Movement: &mv, Wallet: &w}, nil
 	}
 

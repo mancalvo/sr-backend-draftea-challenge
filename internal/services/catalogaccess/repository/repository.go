@@ -16,6 +16,7 @@ import (
 var (
 	ErrNotFound        = errors.New("not found")
 	ErrDuplicateAccess = errors.New("active access already exists for user and offering")
+	ErrDuplicateGrant  = errors.New("access grant already processed for transaction")
 	ErrNoActiveAccess  = errors.New("no active access found")
 )
 
@@ -39,8 +40,9 @@ type Repository interface {
 	// ListEntitlements returns all active entitlements (with offering name) for a user.
 	ListEntitlements(ctx context.Context, userID string) ([]domain.Entitlement, error)
 
-	// GrantAccess inserts a new active access record. Returns ErrDuplicateAccess if
-	// a unique-constraint violation occurs on (user_id, offering_id) WHERE status='active'.
+	// GrantAccess inserts a new active access record. It returns ErrDuplicateGrant
+	// when the transaction has already been processed, or ErrDuplicateAccess when
+	// another active entitlement already exists for the same user and offering.
 	GrantAccess(ctx context.Context, userID, offeringID, transactionID string) (*domain.AccessRecord, error)
 
 	// RevokeAccess marks the active access record for the given transaction as revoked.
@@ -154,8 +156,14 @@ func (r *PostgresRepository) GrantAccess(ctx context.Context, userID, offeringID
 	row := r.db.QueryRowContext(ctx, q, userID, offeringID, transactionID)
 	ar, err := scanAccessRecord(row)
 	if err != nil {
-		// Check for unique constraint violation on the partial unique index.
 		if platformdatabase.IsUniqueViolation(err) {
+			existing, lookupErr := r.GetAccessByTransaction(ctx, transactionID)
+			if lookupErr == nil {
+				return existing, ErrDuplicateGrant
+			}
+			if lookupErr != nil && !errors.Is(lookupErr, ErrNotFound) {
+				return nil, fmt.Errorf("lookup access by transaction after duplicate grant: %w", lookupErr)
+			}
 			return nil, ErrDuplicateAccess
 		}
 		return nil, fmt.Errorf("grant access: %w", err)
@@ -302,6 +310,12 @@ func (m *MemoryRepository) ListEntitlements(_ context.Context, userID string) ([
 func (m *MemoryRepository) GrantAccess(_ context.Context, userID, offeringID, transactionID string) (*domain.AccessRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	for _, ar := range m.AccessRecords {
+		if ar.TransactionID == transactionID {
+			return copyAccessRecord(ar), ErrDuplicateGrant
+		}
+	}
 
 	// Enforce unique active access per user+offering.
 	for _, ar := range m.AccessRecords {

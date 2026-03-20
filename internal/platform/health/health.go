@@ -3,10 +3,9 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
-
-	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
 )
 
 // Checker is a named dependency that can report its readiness.
@@ -47,11 +46,19 @@ func Handler(service string, checkers ...Checker) http.HandlerFunc {
 			}
 		}
 
-		httpx.JSON(w, code, Status{
+		body, err := json.Marshal(Status{
 			Status:  status,
 			Service: service,
 			Checks:  checks,
 		})
+		if err != nil {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(code)
+		_, _ = w.Write(body)
 	}
 }
 

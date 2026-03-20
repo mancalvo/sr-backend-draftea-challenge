@@ -234,6 +234,41 @@ func TestHandleAccessGrantRequested_DuplicateRedelivery_ReplaysGranted(t *testin
 	}
 }
 
+func TestHandleAccessGrantRequested_DuplicateRedeliveryAfterRevoke_ReplaysGrantedWithoutRestoringAccess(t *testing.T) {
+	repo := seedRepo(true)
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(repo, pub, testLogger())
+
+	repo.AccessRecords[0].Status = AccessStatusRevoked
+	revokedAt := time.Now().UTC()
+	repo.AccessRecords[0].RevokedAt = &revokedAt
+
+	cmd := messaging.AccessGrantRequested{
+		TransactionID: "txn-original",
+		UserID:        "user-1",
+		OfferingID:    "offering-1",
+	}
+	env := makeEnvelope(t, messaging.RoutingKeyAccessGrantRequested, cmd)
+
+	err := ch.HandleAccessGrantRequested(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(pub.calls) != 1 {
+		t.Fatalf("expected 1 publish call, got %d", len(pub.calls))
+	}
+	if pub.calls[0].RoutingKey != messaging.RoutingKeyAccessGranted {
+		t.Errorf("routing key = %q, want %q", pub.calls[0].RoutingKey, messaging.RoutingKeyAccessGranted)
+	}
+	if len(repo.AccessRecords) != 1 {
+		t.Fatalf("access record count = %d, want 1", len(repo.AccessRecords))
+	}
+	if repo.AccessRecords[0].Status != AccessStatusRevoked {
+		t.Fatalf("access status = %q, want %q", repo.AccessRecords[0].Status, AccessStatusRevoked)
+	}
+}
+
 // --- access.revoke.requested ---
 
 func TestHandleAccessRevokeRequested_Success(t *testing.T) {

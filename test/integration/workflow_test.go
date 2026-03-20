@@ -70,6 +70,11 @@ type msgRecord struct {
 	Payload       any
 }
 
+type queuedMessage struct {
+	ctx context.Context
+	env messaging.Envelope
+}
+
 // bus is a simple synchronous message bus that routes published messages to the
 // appropriate service handler, simulating RabbitMQ-based async messaging within
 // a single process.
@@ -78,6 +83,9 @@ type bus struct {
 	handlers map[string]func(ctx context.Context, env messaging.Envelope) error
 	log      []msgRecord
 	errs     []error
+	queue    []queuedMessage
+
+	dispatching bool
 }
 
 func newBus() *bus {
@@ -92,30 +100,46 @@ func (b *bus) on(routingKey string, fn func(ctx context.Context, env messaging.E
 }
 
 // Publish implements the Publisher interface used by all service components.
-// It synchronously dispatches the message to the registered handler, simulating
-// the publish -> consume -> handle cycle.
+// It queues the message and drains the queue synchronously, so each publish
+// returns before any downstream publish chained from the consumer is handled.
+// That matches broker semantics more closely than direct recursive dispatch.
 func (b *bus) Publish(ctx context.Context, exchange, routingKey, correlationID string, payload any) error {
-	b.mu.Lock()
-	b.log = append(b.log, msgRecord{Exchange: exchange, RoutingKey: routingKey, CorrelationID: correlationID, Payload: payload})
-	b.mu.Unlock()
-
 	env, err := messaging.NewEnvelope(routingKey, correlationID, payload)
 	if err != nil {
 		return fmt.Errorf("bus: create envelope: %w", err)
 	}
 
-	fn, ok := b.handlers[routingKey]
-	if !ok {
-		// No handler registered; message is published but not consumed.
-		// This can be intentional for outcome events that the saga consumes.
+	b.mu.Lock()
+	b.log = append(b.log, msgRecord{Exchange: exchange, RoutingKey: routingKey, CorrelationID: correlationID, Payload: payload})
+	b.queue = append(b.queue, queuedMessage{ctx: ctx, env: env})
+	if b.dispatching {
+		b.mu.Unlock()
 		return nil
 	}
-	if err := fn(ctx, env); err != nil {
+	b.dispatching = true
+	b.mu.Unlock()
+
+	for {
 		b.mu.Lock()
-		b.errs = append(b.errs, fmt.Errorf("dispatch %s: %w", routingKey, err))
+		if len(b.queue) == 0 {
+			b.dispatching = false
+			b.mu.Unlock()
+			return nil
+		}
+		msg := b.queue[0]
+		b.queue = b.queue[1:]
+		fn, ok := b.handlers[msg.env.Type]
 		b.mu.Unlock()
+
+		if !ok {
+			continue
+		}
+		if err := fn(msg.ctx, msg.env); err != nil {
+			b.mu.Lock()
+			b.errs = append(b.errs, fmt.Errorf("dispatch %s: %w", msg.env.Type, err))
+			b.mu.Unlock()
+		}
 	}
-	return nil
 }
 
 func (b *bus) messages() []msgRecord {
@@ -758,8 +782,10 @@ func TestIntegration_DepositTimeoutHandling(t *testing.T) {
 	}
 
 	// Now simulate a late provider.charge.succeeded arriving after timeout.
-	// Re-register outcome handlers so the bus can route.
-	env, _ := messaging.NewEnvelope(
+	// Route it through the bus so publish/consume ordering matches the real broker flow.
+	if err := h.bus.Publish(
+		context.Background(),
+		messaging.ExchangeOutcomes,
 		messaging.RoutingKeyProviderChargeSucceeded,
 		txnID,
 		messaging.ProviderChargeSucceeded{
@@ -768,10 +794,7 @@ func TestIntegration_DepositTimeoutHandling(t *testing.T) {
 			Amount:        10000,
 			ProviderRef:   "sim-" + txnID,
 		},
-	)
-
-	// Route through saga consumer handler.
-	if err := h.sagaConsumer.HandleOutcome(context.Background(), env); err != nil {
+	); err != nil {
 		t.Fatalf("handleProviderChargeSucceeded on timed_out saga: %v", err)
 	}
 

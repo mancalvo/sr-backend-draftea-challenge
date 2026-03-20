@@ -63,6 +63,19 @@ func (c *Handler) HandleAccessGrantRequested(ctx context.Context, env messaging.
 	logger.Info("processing access grant request")
 
 	_, err := c.service.GrantAccess(ctx, cmd.UserID, cmd.OfferingID, cmd.TransactionID)
+	if errors.Is(err, repository.ErrDuplicateGrant) {
+		logger.Info("access grant already processed for transaction, replaying access.granted")
+		return c.publisher.Publish(ctx,
+			messaging.ExchangeOutcomes,
+			messaging.RoutingKeyAccessGranted,
+			env.CorrelationID,
+			messaging.AccessGranted{
+				TransactionID: cmd.TransactionID,
+				UserID:        cmd.UserID,
+				OfferingID:    cmd.OfferingID,
+			},
+		)
+	}
 	if errors.Is(err, repository.ErrDuplicateAccess) {
 		existing, lookupErr := c.service.GetActiveAccess(ctx, cmd.UserID, cmd.OfferingID)
 		if lookupErr != nil {

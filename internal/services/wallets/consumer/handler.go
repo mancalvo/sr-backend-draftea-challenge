@@ -93,31 +93,19 @@ func (h *Handler) HandleWalletDebitRequested(ctx context.Context, env messaging.
 		)
 	}
 	if errors.Is(err, repository.ErrDuplicateMovement) {
-		wallet, fetchErr := h.service.GetBalance(ctx, cmd.UserID)
-		if fetchErr != nil {
-			logger.Error("failed to fetch wallet after duplicate debit", "error", fetchErr)
-			return fmt.Errorf("fetch wallet after duplicate: %w", fetchErr)
+		logger.Info("duplicate debit request raced with existing movement, reloading stored result")
+		result, err = h.service.Debit(ctx, cmd.UserID, cmd.TransactionID, cmd.SourceStep, cmd.Amount)
+		if err != nil {
+			logger.Error("failed to reload stored debit after duplicate", "error", err)
+			return fmt.Errorf("reload stored debit after duplicate: %w", err)
 		}
-		logger.Info("duplicate debit request, returning idempotent success")
-		return h.publisher.Publish(ctx,
-			messaging.ExchangeOutcomes,
-			messaging.RoutingKeyWalletDebited,
-			env.CorrelationID,
-			messaging.WalletDebited{
-				TransactionID: cmd.TransactionID,
-				UserID:        cmd.UserID,
-				Amount:        cmd.Amount,
-				BalanceAfter:  wallet.Balance,
-				SourceStep:    cmd.SourceStep,
-			},
-		)
 	}
 	if err != nil {
 		logger.Error("failed to debit wallet", "error", err)
 		return fmt.Errorf("debit wallet: %w", err)
 	}
 
-	logger.Info("wallet debited successfully", "balance_after", result.Wallet.Balance)
+	logger.Info("wallet debited successfully", "balance_after", result.Movement.BalanceAfter)
 	return h.publisher.Publish(ctx,
 		messaging.ExchangeOutcomes,
 		messaging.RoutingKeyWalletDebited,
@@ -126,7 +114,7 @@ func (h *Handler) HandleWalletDebitRequested(ctx context.Context, env messaging.
 			TransactionID: cmd.TransactionID,
 			UserID:        cmd.UserID,
 			Amount:        cmd.Amount,
-			BalanceAfter:  result.Wallet.Balance,
+			BalanceAfter:  result.Movement.BalanceAfter,
 			SourceStep:    cmd.SourceStep,
 		},
 	)
@@ -157,31 +145,19 @@ func (h *Handler) HandleWalletCreditRequested(ctx context.Context, env messaging
 		return fmt.Errorf("credit wallet: %w", err)
 	}
 	if errors.Is(err, repository.ErrDuplicateMovement) {
-		wallet, fetchErr := h.service.GetBalance(ctx, cmd.UserID)
-		if fetchErr != nil {
-			logger.Error("failed to fetch wallet after duplicate credit", "error", fetchErr)
-			return fmt.Errorf("fetch wallet after duplicate: %w", fetchErr)
+		logger.Info("duplicate credit request raced with existing movement, reloading stored result")
+		result, err = h.service.Credit(ctx, cmd.UserID, cmd.TransactionID, cmd.SourceStep, cmd.Amount)
+		if err != nil {
+			logger.Error("failed to reload stored credit after duplicate", "error", err)
+			return fmt.Errorf("reload stored credit after duplicate: %w", err)
 		}
-		logger.Info("duplicate credit request, returning idempotent success")
-		return h.publisher.Publish(ctx,
-			messaging.ExchangeOutcomes,
-			messaging.RoutingKeyWalletCredited,
-			env.CorrelationID,
-			messaging.WalletCredited{
-				TransactionID: cmd.TransactionID,
-				UserID:        cmd.UserID,
-				Amount:        cmd.Amount,
-				BalanceAfter:  wallet.Balance,
-				SourceStep:    cmd.SourceStep,
-			},
-		)
 	}
 	if err != nil {
 		logger.Error("failed to credit wallet", "error", err)
 		return fmt.Errorf("credit wallet: %w", err)
 	}
 
-	logger.Info("wallet credited successfully", "balance_after", result.Wallet.Balance)
+	logger.Info("wallet credited successfully", "balance_after", result.Movement.BalanceAfter)
 	return h.publisher.Publish(ctx,
 		messaging.ExchangeOutcomes,
 		messaging.RoutingKeyWalletCredited,
@@ -190,7 +166,7 @@ func (h *Handler) HandleWalletCreditRequested(ctx context.Context, env messaging
 			TransactionID: cmd.TransactionID,
 			UserID:        cmd.UserID,
 			Amount:        cmd.Amount,
-			BalanceAfter:  result.Wallet.Balance,
+			BalanceAfter:  result.Movement.BalanceAfter,
 			SourceStep:    cmd.SourceStep,
 		},
 	)

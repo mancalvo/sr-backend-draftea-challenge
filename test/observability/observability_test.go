@@ -321,15 +321,7 @@ func assertHealthOK(t *testing.T, handler http.Handler, wantService string) {
 
 func decodeHealthStatus(t *testing.T, w *httptest.ResponseRecorder, out *health.Status) {
 	t.Helper()
-	var resp httpx.Response
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	dataBytes, err := json.Marshal(resp.Data)
-	if err != nil {
-		t.Fatalf("failed to marshal data: %v", err)
-	}
-	if err := json.Unmarshal(dataBytes, out); err != nil {
+	if err := json.Unmarshal(w.Body.Bytes(), out); err != nil {
 		t.Fatalf("failed to decode status: %v", err)
 	}
 }

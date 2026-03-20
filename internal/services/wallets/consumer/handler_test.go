@@ -268,6 +268,52 @@ func TestHandleWalletDebitRequested_IdempotentDuplicate(t *testing.T) {
 	}
 }
 
+func TestHandleWalletDebitRequested_DuplicateReplayUsesOriginalBalanceAfter(t *testing.T) {
+	repo := seedRepo(10000)
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(repo, pub, testLogger())
+
+	debitCmd := messaging.WalletDebitRequested{
+		TransactionID: "txn-1",
+		UserID:        "user-1",
+		Amount:        3000,
+		Currency:      "ARS",
+		SourceStep:    "purchase_debit",
+	}
+	debitEnv := makeEnvelope(t, messaging.RoutingKeyWalletDebitRequested, debitCmd)
+	if err := ch.HandleWalletDebitRequested(context.Background(), debitEnv); err != nil {
+		t.Fatalf("first debit: %v", err)
+	}
+
+	creditCmd := messaging.WalletCreditRequested{
+		TransactionID: "txn-2",
+		UserID:        "user-1",
+		Amount:        1500,
+		Currency:      "ARS",
+		SourceStep:    "deposit_credit",
+	}
+	creditEnv := makeEnvelope(t, messaging.RoutingKeyWalletCreditRequested, creditCmd)
+	if err := ch.HandleWalletCreditRequested(context.Background(), creditEnv); err != nil {
+		t.Fatalf("credit after debit: %v", err)
+	}
+
+	pub.calls = nil
+	if err := ch.HandleWalletDebitRequested(context.Background(), debitEnv); err != nil {
+		t.Fatalf("duplicate debit: %v", err)
+	}
+
+	if len(pub.calls) != 1 {
+		t.Fatalf("expected 1 publish call on duplicate debit, got %d", len(pub.calls))
+	}
+	outcome, ok := pub.calls[0].Payload.(messaging.WalletDebited)
+	if !ok {
+		t.Fatalf("payload type = %T, want messaging.WalletDebited", pub.calls[0].Payload)
+	}
+	if outcome.BalanceAfter != 7000 {
+		t.Fatalf("balance_after = %d, want 7000", outcome.BalanceAfter)
+	}
+}
+
 // --- wallet.credit.requested ---
 
 func TestHandleWalletCreditRequested_Success(t *testing.T) {
@@ -382,5 +428,51 @@ func TestHandleWalletCreditRequested_IdempotentDuplicate(t *testing.T) {
 	}
 	if pub.calls[0].RoutingKey != messaging.RoutingKeyWalletCredited {
 		t.Errorf("routing key = %q, want %q", pub.calls[0].RoutingKey, messaging.RoutingKeyWalletCredited)
+	}
+}
+
+func TestHandleWalletCreditRequested_DuplicateReplayUsesOriginalBalanceAfter(t *testing.T) {
+	repo := seedRepo(5000)
+	pub := &mockPublisher{}
+	ch := NewConsumerHandler(repo, pub, testLogger())
+
+	creditCmd := messaging.WalletCreditRequested{
+		TransactionID: "txn-1",
+		UserID:        "user-1",
+		Amount:        3000,
+		Currency:      "ARS",
+		SourceStep:    "deposit_credit",
+	}
+	creditEnv := makeEnvelope(t, messaging.RoutingKeyWalletCreditRequested, creditCmd)
+	if err := ch.HandleWalletCreditRequested(context.Background(), creditEnv); err != nil {
+		t.Fatalf("first credit: %v", err)
+	}
+
+	debitCmd := messaging.WalletDebitRequested{
+		TransactionID: "txn-2",
+		UserID:        "user-1",
+		Amount:        1000,
+		Currency:      "ARS",
+		SourceStep:    "purchase_debit",
+	}
+	debitEnv := makeEnvelope(t, messaging.RoutingKeyWalletDebitRequested, debitCmd)
+	if err := ch.HandleWalletDebitRequested(context.Background(), debitEnv); err != nil {
+		t.Fatalf("debit after credit: %v", err)
+	}
+
+	pub.calls = nil
+	if err := ch.HandleWalletCreditRequested(context.Background(), creditEnv); err != nil {
+		t.Fatalf("duplicate credit: %v", err)
+	}
+
+	if len(pub.calls) != 1 {
+		t.Fatalf("expected 1 publish call on duplicate credit, got %d", len(pub.calls))
+	}
+	outcome, ok := pub.calls[0].Payload.(messaging.WalletCredited)
+	if !ok {
+		t.Fatalf("payload type = %T, want messaging.WalletCredited", pub.calls[0].Payload)
+	}
+	if outcome.BalanceAfter != 8000 {
+		t.Fatalf("balance_after = %d, want 8000", outcome.BalanceAfter)
 	}
 }

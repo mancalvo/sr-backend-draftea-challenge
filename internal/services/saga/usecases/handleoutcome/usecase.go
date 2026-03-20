@@ -183,15 +183,15 @@ func (u *UseCase) publishAccessGrant(ctx context.Context, env messaging.Envelope
 		return err
 	}
 
-	if err := u.updateSagaStep(ctx, s.ID, workflows.PurchaseGrantStep); err != nil {
-		return err
-	}
 	if err := activities.PublishAccessGrantRequested(ctx, u.publisher, s.TransactionID, messaging.AccessGrantRequested{
 		TransactionID: s.TransactionID,
 		UserID:        purchasePayload.UserID,
 		OfferingID:    purchasePayload.OfferingID,
 	}); err != nil {
 		return fmt.Errorf("publish access.grant.requested: %w", err)
+	}
+	if err := u.updateSagaStep(ctx, s.ID, workflows.PurchaseGrantStep); err != nil {
+		return err
 	}
 
 	logger.Info("published access.grant.requested")
@@ -460,9 +460,6 @@ func (u *UseCase) publishRefundCredit(ctx context.Context, env messaging.Envelop
 		return err
 	}
 
-	if err := u.updateSagaStep(ctx, s.ID, workflows.RefundCreditStep); err != nil {
-		return err
-	}
 	if err := activities.PublishWalletCreditRequested(ctx, u.publisher, s.TransactionID, messaging.WalletCreditRequested{
 		TransactionID: s.TransactionID,
 		UserID:        refundPayload.UserID,
@@ -471,6 +468,9 @@ func (u *UseCase) publishRefundCredit(ctx context.Context, env messaging.Envelop
 		SourceStep:    workflows.RefundCreditStep,
 	}); err != nil {
 		return fmt.Errorf("publish wallet.credit.requested for refund: %w", err)
+	}
+	if err := u.updateSagaStep(ctx, s.ID, workflows.RefundCreditStep); err != nil {
+		return err
 	}
 
 	logger.Info("published wallet.credit.requested for refund")
@@ -551,9 +551,6 @@ func (u *UseCase) recordProviderSuccess(ctx context.Context, env messaging.Envel
 		logger.Info("late provider success on timed_out saga, publishing wallet credit")
 	}
 
-	if err := u.updateSagaStep(ctx, s.ID, step); err != nil {
-		return err
-	}
 	if err := activities.PublishWalletCreditRequested(ctx, u.publisher, s.TransactionID, messaging.WalletCreditRequested{
 		TransactionID: s.TransactionID,
 		UserID:        depositPayload.UserID,
@@ -562,6 +559,9 @@ func (u *UseCase) recordProviderSuccess(ctx context.Context, env messaging.Envel
 		SourceStep:    step,
 	}); err != nil {
 		return fmt.Errorf("publish wallet.credit.requested for deposit: %w", err)
+	}
+	if err := u.updateSagaStep(ctx, s.ID, step); err != nil {
+		return err
 	}
 
 	logger.Info("published wallet.credit.requested for deposit")
