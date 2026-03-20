@@ -48,6 +48,9 @@ type Repository interface {
 	// if the key already exists.
 	SaveIdempotencyKey(ctx context.Context, key *domain.IdempotencyKey) error
 
+	// FinalizeIdempotencyKey stores the final response for an existing reserved key.
+	FinalizeIdempotencyKey(ctx context.Context, scope, key string, status int, body json.RawMessage) error
+
 	// GetIdempotencyKey returns a stored key if it exists and has not expired,
 	// or ErrNotFound. The lookup is scoped by (scope, key).
 	GetIdempotencyKey(ctx context.Context, scope, key string) (*domain.IdempotencyKey, error)
@@ -184,12 +187,16 @@ func (r *PostgresRepository) ListTimedOutSagas(ctx context.Context, now time.Tim
 }
 
 func (r *PostgresRepository) SaveIdempotencyKey(ctx context.Context, key *domain.IdempotencyKey) error {
+	state := key.State
+	if state == "" {
+		state = domain.IdempotencyStateCompleted
+	}
 	const q = `INSERT INTO saga_orchestrator.idempotency_keys
-		(scope, key, request_hash, transaction_id, response_status, response_body, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`
+		(scope, key, request_hash, transaction_id, state, response_status, response_body, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 	_, err := r.db.ExecContext(ctx, q,
 		key.Scope, key.Key, key.RequestHash,
-		key.TransactionID, key.ResponseStatus, key.ResponseBody, key.ExpiresAt,
+		key.TransactionID, state, key.ResponseStatus, key.ResponseBody, key.ExpiresAt,
 	)
 	if err != nil {
 		if platformdatabase.IsUniqueViolation(err) {
@@ -200,15 +207,34 @@ func (r *PostgresRepository) SaveIdempotencyKey(ctx context.Context, key *domain
 	return nil
 }
 
+func (r *PostgresRepository) FinalizeIdempotencyKey(ctx context.Context, scope, key string, status int, body json.RawMessage) error {
+	const q = `UPDATE saga_orchestrator.idempotency_keys
+		SET state = 'completed', response_status = $1, response_body = $2
+		WHERE scope = $3 AND key = $4`
+	result, err := r.db.ExecContext(ctx, q, status, body, scope, key)
+	if err != nil {
+		return fmt.Errorf("finalize idempotency key: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("idempotency rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (r *PostgresRepository) GetIdempotencyKey(ctx context.Context, scope, key string) (*domain.IdempotencyKey, error) {
-	const q = `SELECT scope, key, request_hash, transaction_id, response_status, response_body, created_at, expires_at
+	const q = `SELECT scope, key, request_hash, transaction_id, state, response_status, response_body, created_at, expires_at
 		FROM saga_orchestrator.idempotency_keys
 		WHERE scope = $1 AND key = $2 AND expires_at > now()`
 	var ik domain.IdempotencyKey
+	var state string
 	var body sql.NullString
 	err := r.db.QueryRowContext(ctx, q, scope, key).Scan(
 		&ik.Scope, &ik.Key, &ik.RequestHash,
-		&ik.TransactionID, &ik.ResponseStatus, &body,
+		&ik.TransactionID, &state, &ik.ResponseStatus, &body,
 		&ik.CreatedAt, &ik.ExpiresAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -220,6 +246,7 @@ func (r *PostgresRepository) GetIdempotencyKey(ctx context.Context, scope, key s
 	if body.Valid {
 		ik.ResponseBody = json.RawMessage(body.String)
 	}
+	ik.State = domain.IdempotencyState(state)
 	return &ik, nil
 }
 
@@ -377,7 +404,25 @@ func (m *MemoryRepository) SaveIdempotencyKey(_ context.Context, key *domain.Ide
 	if stored.CreatedAt.IsZero() {
 		stored.CreatedAt = time.Now().UTC()
 	}
+	if stored.State == "" {
+		stored.State = domain.IdempotencyStateCompleted
+	}
 	m.idempotencyKeys[mk] = &stored
+	return nil
+}
+
+func (m *MemoryRepository) FinalizeIdempotencyKey(_ context.Context, scope, key string, status int, body json.RawMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	mk := idempotencyMapKey(scope, key)
+	ik, ok := m.idempotencyKeys[mk]
+	if !ok {
+		return ErrNotFound
+	}
+	ik.State = domain.IdempotencyStateCompleted
+	ik.ResponseStatus = status
+	ik.ResponseBody = append(json.RawMessage(nil), body...)
 	return nil
 }
 

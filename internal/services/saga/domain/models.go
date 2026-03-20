@@ -106,14 +106,23 @@ type SagaInstance struct {
 	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
+// IdempotencyState represents the lifecycle state of a stored idempotent command.
+type IdempotencyState string
+
+const (
+	IdempotencyStateProcessing IdempotencyState = "processing"
+	IdempotencyStateCompleted  IdempotencyState = "completed"
+)
+
 // IdempotencyKey stores the result of a previously accepted command.
 type IdempotencyKey struct {
-	Key            string          `json:"key"`
-	Scope          string          `json:"scope"`
-	RequestHash    string          `json:"request_hash"`
-	TransactionID  string          `json:"transaction_id"`
-	ResponseStatus int             `json:"response_status"`
-	ResponseBody   json.RawMessage `json:"response_body,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
-	ExpiresAt      time.Time       `json:"expires_at"`
+	Key            string           `json:"key"`
+	Scope          string           `json:"scope"`
+	RequestHash    string           `json:"request_hash"`
+	TransactionID  string           `json:"transaction_id"`
+	State          IdempotencyState `json:"state"`
+	ResponseStatus int              `json:"response_status"`
+	ResponseBody   json.RawMessage  `json:"response_body,omitempty"`
+	CreatedAt      time.Time        `json:"created_at"`
+	ExpiresAt      time.Time        `json:"expires_at"`
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/logging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/activities"
@@ -96,20 +97,23 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 		Currency: cmd.Currency,
 	})
 
-	replay, err := u.idempotency.Check(ctx, scope, cmd.IdempotencyKey, requestHash)
+	transactionID := uuid.New().String()
+	logger = logger.With(slog.String(logging.KeyTransactionID, transactionID))
+
+	reservation, err := u.idempotency.Reserve(ctx, scope, cmd.IdempotencyKey, requestHash, transactionID)
 	if err != nil {
 		if errors.Is(err, idempotency.ErrMismatch) {
 			return nil, commanderror.New(http.StatusConflict, err.Error(), "IDEMPOTENCY_MISMATCH")
 		}
+		if errors.Is(err, idempotency.ErrInProgress) {
+			return nil, commanderror.New(http.StatusConflict, err.Error(), "IDEMPOTENCY_IN_PROGRESS")
+		}
 		logger.Error("failed to check idempotency key", "error", err)
 		return nil, fmt.Errorf("check idempotency: %w", err)
 	}
-	if replay != nil {
-		return &Result{Cached: replay}, nil
+	if reservation.Replay != nil {
+		return &Result{Cached: reservation.Replay}, nil
 	}
-
-	transactionID := uuid.New().String()
-	logger = logger.With(slog.String(logging.KeyTransactionID, transactionID))
 
 	_, err = u.payments.RegisterTransaction(ctx, client.RegisterTransactionRequest{
 		ID:       transactionID,
@@ -120,7 +124,7 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 	})
 	if err != nil {
 		logger.Error("failed to register transaction in payments", "error", err)
-		return nil, commanderror.New(http.StatusBadGateway, "payment service unavailable", "")
+		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "payment service unavailable", ""))
 	}
 
 	payload, err := json.Marshal(workflows.DepositPayload{
@@ -129,7 +133,8 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 		Currency: cmd.Currency,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("marshal deposit payload: %w", err)
+		logger.Error("failed to marshal deposit payload", "error", err)
+		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusInternalServerError, "internal server error", ""))
 	}
 
 	timeoutAt := time.Now().UTC().Add(u.sagaTimeout)
@@ -144,7 +149,7 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 	})
 	if err != nil {
 		logger.Error("failed to create saga", "error", err)
-		return nil, fmt.Errorf("create saga: %w", err)
+		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusInternalServerError, "internal server error", ""))
 	}
 
 	logger.Info("deposit saga created", "saga_id", sagaInstance.ID)
@@ -156,15 +161,34 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 		Currency:      cmd.Currency,
 	}); err != nil {
 		logger.Error("failed to publish payments.deposit.requested", "error", err)
+		return nil, u.finalizeCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "failed to dispatch deposit command", "INITIAL_DISPATCH_FAILED"))
 	}
 
 	response := AcceptedResponse{
 		TransactionID: transactionID,
 		Status:        "pending",
 	}
-	if err := u.idempotency.SaveAccepted(ctx, scope, cmd.IdempotencyKey, requestHash, transactionID, http.StatusAccepted, response); err != nil {
-		logger.Error("failed to save idempotency key", "error", err, "key", cmd.IdempotencyKey, "scope", scope)
+	if err := u.finalizeSuccess(ctx, scope, cmd.IdempotencyKey, response); err != nil {
+		logger.Error("failed to finalize idempotency key", "error", err, "key", cmd.IdempotencyKey, "scope", scope)
 	}
 
 	return &Result{Response: response}, nil
+}
+
+func (u *UseCase) finalizeSuccess(ctx context.Context, scope, key string, response AcceptedResponse) error {
+	body, err := httpx.MarshalResponse(http.StatusAccepted, response)
+	if err != nil {
+		return fmt.Errorf("marshal success response: %w", err)
+	}
+	return u.idempotency.Finalize(ctx, scope, key, http.StatusAccepted, body)
+}
+
+func (u *UseCase) finalizeCommandError(ctx context.Context, scope, key string, err *commanderror.Error) *commanderror.Error {
+	body, marshalErr := httpx.MarshalErrorResponse(err.HTTPMessage(), err.HTTPCode(), nil)
+	if marshalErr == nil {
+		if finalizeErr := u.idempotency.Finalize(ctx, scope, key, err.HTTPStatus(), body); finalizeErr != nil {
+			logging.FromContext(ctx).Error("failed to finalize idempotency error response", "error", finalizeErr, "scope", scope, "key", key)
+		}
+	}
+	return err
 }

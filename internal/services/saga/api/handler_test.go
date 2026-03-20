@@ -17,6 +17,7 @@ import (
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/activities"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/domain"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
@@ -97,6 +98,7 @@ func (m *mockCatalogClient) RefundPrecheck(_ context.Context, _, _, _ string) (*
 }
 
 type mockPaymentsClient struct {
+	mu             sync.Mutex
 	registerResult *RegisterTransactionResponse
 	registerErr    error
 	getResult      *TransactionDetails
@@ -106,12 +108,16 @@ type mockPaymentsClient struct {
 }
 
 func (m *mockPaymentsClient) RegisterTransaction(_ context.Context, req RegisterTransactionRequest) (*RegisterTransactionResponse, error) {
+	m.mu.Lock()
 	m.registerCalls = append(m.registerCalls, req)
-	if m.registerErr != nil {
-		return nil, m.registerErr
+	result := m.registerResult
+	err := m.registerErr
+	m.mu.Unlock()
+	if err != nil {
+		return nil, err
 	}
-	if m.registerResult != nil {
-		return m.registerResult, nil
+	if result != nil {
+		return result, nil
 	}
 	return &RegisterTransactionResponse{
 		ID:     req.ID,
@@ -120,15 +126,19 @@ func (m *mockPaymentsClient) RegisterTransaction(_ context.Context, req Register
 }
 
 func (m *mockPaymentsClient) GetTransaction(_ context.Context, transactionID string) (*TransactionDetails, error) {
-	if m.getErr != nil {
-		return nil, m.getErr
+	m.mu.Lock()
+	result := m.getResult
+	err := m.getErr
+	m.mu.Unlock()
+	if err != nil {
+		return nil, err
 	}
-	if m.getResult != nil {
-		result := *m.getResult
-		if result.ID == "" {
-			result.ID = transactionID
+	if result != nil {
+		resultCopy := *result
+		if resultCopy.ID == "" {
+			resultCopy.ID = transactionID
 		}
-		return &result, nil
+		return &resultCopy, nil
 	}
 	offeringID := "offering-1"
 	return &TransactionDetails{
@@ -146,10 +156,73 @@ func (m *mockPaymentsClient) UpdateTransactionStatus(_ context.Context, _ string
 	return m.updateErr
 }
 
+func (m *mockPaymentsClient) RegisterCalls() []RegisterTransactionRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]RegisterTransactionRequest, len(m.registerCalls))
+	copy(result, m.registerCalls)
+	return result
+}
+
 type mockPublisher struct{}
 
 func (m *mockPublisher) Publish(_ context.Context, _, _, _ string, _ any) error {
 	return nil
+}
+
+type failingPublisher struct {
+	err error
+}
+
+func (p *failingPublisher) Publish(_ context.Context, _, _, _ string, _ any) error {
+	return p.err
+}
+
+type gatedPaymentsClient struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	calls   int
+}
+
+func newGatedPaymentsClient() *gatedPaymentsClient {
+	return &gatedPaymentsClient{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (g *gatedPaymentsClient) RegisterTransaction(_ context.Context, req RegisterTransactionRequest) (*RegisterTransactionResponse, error) {
+	g.mu.Lock()
+	g.calls++
+	g.mu.Unlock()
+	g.once.Do(func() { close(g.started) })
+	<-g.release
+	return &RegisterTransactionResponse{ID: req.ID, Status: "pending"}, nil
+}
+
+func (g *gatedPaymentsClient) GetTransaction(_ context.Context, transactionID string) (*TransactionDetails, error) {
+	offeringID := "offering-1"
+	return &TransactionDetails{
+		ID:         transactionID,
+		UserID:     "user-1",
+		Type:       "purchase",
+		Status:     "completed",
+		Amount:     5000,
+		Currency:   "ARS",
+		OfferingID: &offeringID,
+	}, nil
+}
+
+func (g *gatedPaymentsClient) UpdateTransactionStatus(_ context.Context, _ string, _ string, _ *string, _ *string) error {
+	return nil
+}
+
+func (g *gatedPaymentsClient) Calls() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.calls
 }
 
 type publishedMessage struct {
@@ -223,7 +296,11 @@ func newTestRouter(handler *Handler) http.Handler {
 }
 
 func newTestHandler(repo Repository, catalog CatalogClient, payments PaymentsClient) *Handler {
-	return NewHandler(repo, catalog, payments, &mockPublisher{}, 30*time.Second, testLogger())
+	return newTestHandlerWithPublisher(repo, catalog, payments, &mockPublisher{})
+}
+
+func newTestHandlerWithPublisher(repo Repository, catalog CatalogClient, payments PaymentsClient, publisher activities.Publisher) *Handler {
+	return NewHandler(repo, catalog, payments, publisher, 30*time.Second, testLogger())
 }
 
 // ---- POST /deposits ----
@@ -371,6 +448,110 @@ func TestHandleDeposit_IdempotentAcceptance(t *testing.T) {
 	}
 }
 
+func TestHandleDeposit_IdempotencyInProgress(t *testing.T) {
+	repo := NewMemoryRepository()
+	payments := newGatedPaymentsClient()
+	handler := newTestHandlerWithPublisher(repo, &mockCatalogClient{}, payments, &mockPublisher{})
+	router := newTestRouter(handler)
+
+	body := mustJSON(t, DepositCommand{
+		UserID:         "user-1",
+		Amount:         10000,
+		Currency:       "ARS",
+		IdempotencyKey: "dep-key-in-progress",
+	})
+
+	var wg sync.WaitGroup
+	first := httptest.NewRecorder()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(first, req)
+	}()
+
+	<-payments.started
+
+	secondReq := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	secondReq.Header.Set("Content-Type", "application/json")
+	second := httptest.NewRecorder()
+	router.ServeHTTP(second, secondReq)
+
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second: status = %d, want %d; body: %s", second.Code, http.StatusConflict, second.Body.String())
+	}
+
+	var secondResp httpx.Response
+	if err := json.NewDecoder(second.Body).Decode(&secondResp); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if secondResp.Error == nil || secondResp.Error.Code != "IDEMPOTENCY_IN_PROGRESS" {
+		t.Fatalf("expected IDEMPOTENCY_IN_PROGRESS, got %+v", secondResp.Error)
+	}
+
+	close(payments.release)
+	wg.Wait()
+
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first: status = %d, want %d; body: %s", first.Code, http.StatusAccepted, first.Body.String())
+	}
+	if payments.Calls() != 1 {
+		t.Fatalf("register calls = %d, want 1", payments.Calls())
+	}
+}
+
+func TestHandleDeposit_InitialDispatchFailure_ReplaysFailure(t *testing.T) {
+	repo := NewMemoryRepository()
+	payments := &mockPaymentsClient{}
+	handler := newTestHandlerWithPublisher(
+		repo,
+		&mockCatalogClient{},
+		payments,
+		&failingPublisher{err: errors.New("broker unavailable")},
+	)
+	router := newTestRouter(handler)
+
+	body := mustJSON(t, DepositCommand{
+		UserID:         "user-1",
+		Amount:         10000,
+		Currency:       "ARS",
+		IdempotencyKey: "dep-dispatch-failure",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	first := httptest.NewRecorder()
+	router.ServeHTTP(first, req)
+
+	if first.Code != http.StatusBadGateway {
+		t.Fatalf("first: status = %d, want %d; body: %s", first.Code, http.StatusBadGateway, first.Body.String())
+	}
+
+	var firstResp httpx.Response
+	if err := json.NewDecoder(bytes.NewReader(first.Body.Bytes())).Decode(&firstResp); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	if firstResp.Error == nil || firstResp.Error.Code != "INITIAL_DISPATCH_FAILED" {
+		t.Fatalf("expected INITIAL_DISPATCH_FAILED, got %+v", firstResp.Error)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	second := httptest.NewRecorder()
+	router.ServeHTTP(second, req)
+
+	if second.Code != http.StatusBadGateway {
+		t.Fatalf("second: status = %d, want %d; body: %s", second.Code, http.StatusBadGateway, second.Body.String())
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("cached failure mismatch:\nfirst=%s\nsecond=%s", first.Body.String(), second.Body.String())
+	}
+	if len(payments.RegisterCalls()) != 1 {
+		t.Fatalf("register calls = %d, want 1", len(payments.RegisterCalls()))
+	}
+}
+
 // ---- POST /purchases ----
 
 func TestHandlePurchase_Success(t *testing.T) {
@@ -422,6 +603,46 @@ func TestHandlePurchase_PrecheckDenied_FailFast(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp)
 	if resp.Error == nil || resp.Error.Code != "PRECHECK_DENIED" {
 		t.Errorf("expected PRECHECK_DENIED error code, got %+v", resp.Error)
+	}
+}
+
+func TestHandlePurchase_PrecheckDenied_ReplaysFailure(t *testing.T) {
+	repo := NewMemoryRepository()
+	catalog := &mockCatalogClient{
+		purchaseResult: &PrecheckResult{Allowed: false, Reason: "user already has active access"},
+	}
+	payments := &mockPaymentsClient{}
+	handler := newTestHandler(repo, catalog, payments)
+	router := newTestRouter(handler)
+
+	body := mustJSON(t, PurchaseCommand{
+		UserID:         "user-1",
+		OfferingID:     "offering-1",
+		IdempotencyKey: "pur-precheck-denied",
+	})
+
+	firstReq := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
+	firstReq.Header.Set("Content-Type", "application/json")
+	first := httptest.NewRecorder()
+	router.ServeHTTP(first, firstReq)
+
+	if first.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("first: status = %d, want %d; body: %s", first.Code, http.StatusUnprocessableEntity, first.Body.String())
+	}
+
+	secondReq := httptest.NewRequest(http.MethodPost, "/purchases", bytes.NewReader(body))
+	secondReq.Header.Set("Content-Type", "application/json")
+	second := httptest.NewRecorder()
+	router.ServeHTTP(second, secondReq)
+
+	if second.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("second: status = %d, want %d; body: %s", second.Code, http.StatusUnprocessableEntity, second.Body.String())
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("cached failure mismatch:\nfirst=%s\nsecond=%s", first.Body.String(), second.Body.String())
+	}
+	if len(payments.RegisterCalls()) != 0 {
+		t.Fatalf("register calls = %d, want 0", len(payments.RegisterCalls()))
 	}
 }
 

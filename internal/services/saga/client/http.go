@@ -84,11 +84,19 @@ type HTTPCatalogClient struct {
 
 // NewHTTPCatalogClient creates a new client for catalog-access.
 func NewHTTPCatalogClient(baseURL string, timeout time.Duration) *HTTPCatalogClient {
+	return NewHTTPCatalogClientWithHTTPClient(baseURL, &http.Client{
+		Timeout: timeout,
+	})
+}
+
+// NewHTTPCatalogClientWithHTTPClient creates a new client with an injected HTTP client.
+func NewHTTPCatalogClientWithHTTPClient(baseURL string, httpClient *http.Client) *HTTPCatalogClient {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 5 * time.Second}
+	}
 	return &HTTPCatalogClient{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+		baseURL:    baseURL,
+		httpClient: httpClient,
 	}
 }
 
@@ -161,11 +169,19 @@ type HTTPPaymentsClient struct {
 
 // NewHTTPPaymentsClient creates a new client for the payments service.
 func NewHTTPPaymentsClient(baseURL string, timeout time.Duration) *HTTPPaymentsClient {
+	return NewHTTPPaymentsClientWithHTTPClient(baseURL, &http.Client{
+		Timeout: timeout,
+	})
+}
+
+// NewHTTPPaymentsClientWithHTTPClient creates a new client with an injected HTTP client.
+func NewHTTPPaymentsClientWithHTTPClient(baseURL string, httpClient *http.Client) *HTTPPaymentsClient {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 5 * time.Second}
+	}
 	return &HTTPPaymentsClient{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+		baseURL:    baseURL,
+		httpClient: httpClient,
 	}
 }
 

@@ -83,18 +83,6 @@ func (r *PostgresRepository) Debit(ctx context.Context, userID, transactionID, s
 	}
 	defer tx.Rollback()
 
-	existing, err := r.findExistingMovement(ctx, tx, transactionID, sourceStep)
-	if err != nil {
-		return nil, err
-	}
-	if existing != nil {
-		w, err := r.getWalletInTx(ctx, tx, userID)
-		if err != nil {
-			return nil, err
-		}
-		return &DebitResult{Movement: existing, Wallet: w}, nil
-	}
-
 	var w domain.Wallet
 	const lockQ = `SELECT id, user_id, balance, currency, created_at, updated_at
 		FROM wallets.wallets WHERE user_id = $1 FOR UPDATE`
@@ -106,6 +94,14 @@ func (r *PostgresRepository) Debit(ctx context.Context, userID, transactionID, s
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lock wallet: %w", err)
+	}
+
+	existing, err := r.findExistingMovement(ctx, tx, transactionID, sourceStep)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return &DebitResult{Movement: existing, Wallet: &w}, nil
 	}
 
 	if w.Balance < amount {
@@ -151,18 +147,6 @@ func (r *PostgresRepository) Credit(ctx context.Context, userID, transactionID, 
 	}
 	defer tx.Rollback()
 
-	existing, err := r.findExistingMovement(ctx, tx, transactionID, sourceStep)
-	if err != nil {
-		return nil, err
-	}
-	if existing != nil {
-		w, err := r.getWalletInTx(ctx, tx, userID)
-		if err != nil {
-			return nil, err
-		}
-		return &CreditResult{Movement: existing, Wallet: w}, nil
-	}
-
 	var w domain.Wallet
 	const lockQ = `SELECT id, user_id, balance, currency, created_at, updated_at
 		FROM wallets.wallets WHERE user_id = $1 FOR UPDATE`
@@ -174,6 +158,14 @@ func (r *PostgresRepository) Credit(ctx context.Context, userID, transactionID, 
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lock wallet: %w", err)
+	}
+
+	existing, err := r.findExistingMovement(ctx, tx, transactionID, sourceStep)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return &CreditResult{Movement: existing, Wallet: &w}, nil
 	}
 
 	balanceBefore := w.Balance

@@ -15,7 +15,9 @@ type (
 )
 
 const (
-	OutcomeSucceeded = domain.OutcomeSucceeded
+	OutcomeSucceeded           = domain.OutcomeSucceeded
+	IdempotencyStateCompleted  = domain.IdempotencyStateCompleted
+	IdempotencyStateProcessing = domain.IdempotencyStateProcessing
 
 	SagaTypeDeposit  = domain.SagaTypeDeposit
 	SagaTypePurchase = domain.SagaTypePurchase
@@ -253,6 +255,7 @@ func TestMemoryRepository_IdempotencyKey_SaveAndGet(t *testing.T) {
 		Scope:          "deposit",
 		RequestHash:    "abc123",
 		TransactionID:  "txn-1",
+		State:          IdempotencyStateCompleted,
 		ResponseStatus: 202,
 		ResponseBody:   json.RawMessage(`{"success":true}`),
 		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
@@ -269,6 +272,9 @@ func TestMemoryRepository_IdempotencyKey_SaveAndGet(t *testing.T) {
 	if got.TransactionID != "txn-1" {
 		t.Errorf("transaction_id = %s, want txn-1", got.TransactionID)
 	}
+	if got.State != IdempotencyStateCompleted {
+		t.Errorf("state = %s, want completed", got.State)
+	}
 	if got.ResponseStatus != 202 {
 		t.Errorf("response_status = %d, want 202", got.ResponseStatus)
 	}
@@ -277,6 +283,43 @@ func TestMemoryRepository_IdempotencyKey_SaveAndGet(t *testing.T) {
 	}
 	if got.RequestHash != "abc123" {
 		t.Errorf("request_hash = %s, want abc123", got.RequestHash)
+	}
+}
+
+func TestMemoryRepository_IdempotencyKey_Finalize(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	ik := &IdempotencyKey{
+		Key:           "processing-key",
+		Scope:         "deposit",
+		RequestHash:   "hash-processing",
+		TransactionID: "txn-1",
+		State:         IdempotencyStateProcessing,
+		ExpiresAt:     time.Now().UTC().Add(24 * time.Hour),
+	}
+
+	if err := repo.SaveIdempotencyKey(ctx, ik); err != nil {
+		t.Fatalf("save key: %v", err)
+	}
+
+	body := json.RawMessage(`{"success":true,"data":{"transaction_id":"txn-1","status":"pending"}}`)
+	if err := repo.FinalizeIdempotencyKey(ctx, "deposit", "processing-key", 202, body); err != nil {
+		t.Fatalf("finalize key: %v", err)
+	}
+
+	got, err := repo.GetIdempotencyKey(ctx, "deposit", "processing-key")
+	if err != nil {
+		t.Fatalf("get finalized key: %v", err)
+	}
+	if got.State != IdempotencyStateCompleted {
+		t.Errorf("state = %s, want completed", got.State)
+	}
+	if got.ResponseStatus != 202 {
+		t.Errorf("response_status = %d, want 202", got.ResponseStatus)
+	}
+	if string(got.ResponseBody) != string(body) {
+		t.Errorf("response_body = %s, want %s", got.ResponseBody, body)
 	}
 }
 
@@ -289,6 +332,7 @@ func TestMemoryRepository_IdempotencyKey_Duplicate(t *testing.T) {
 		Scope:          "deposit",
 		RequestHash:    "hash1",
 		TransactionID:  "txn-1",
+		State:          IdempotencyStateCompleted,
 		ResponseStatus: 202,
 		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
 	}
@@ -309,6 +353,7 @@ func TestMemoryRepository_IdempotencyKey_Expired(t *testing.T) {
 		Scope:          "deposit",
 		RequestHash:    "hash1",
 		TransactionID:  "txn-1",
+		State:          IdempotencyStateCompleted,
 		ResponseStatus: 202,
 		ExpiresAt:      time.Now().UTC().Add(-1 * time.Hour), // already expired
 	}
@@ -339,6 +384,7 @@ func TestMemoryRepository_IdempotencyKey_ScopeIsolation(t *testing.T) {
 		Scope:          "deposit",
 		RequestHash:    "hash-deposit",
 		TransactionID:  "txn-1",
+		State:          IdempotencyStateCompleted,
 		ResponseStatus: 202,
 		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
 	}
@@ -352,6 +398,7 @@ func TestMemoryRepository_IdempotencyKey_ScopeIsolation(t *testing.T) {
 		Scope:          "purchase",
 		RequestHash:    "hash-purchase",
 		TransactionID:  "txn-2",
+		State:          IdempotencyStateCompleted,
 		ResponseStatus: 202,
 		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
 	}

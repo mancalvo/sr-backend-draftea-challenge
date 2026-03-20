@@ -32,6 +32,9 @@ import (
 	catalogrepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/repository"
 	catalogservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/catalogaccess/service"
 	paymentsconsumer "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/consumer"
+	paymentsdomain "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/domain"
+	paymentsrepository "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/repository"
+	paymentsservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/service"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/payments/usecases/processdeposit"
 	sagaapi "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/api"
 	sagaclient "github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
@@ -68,6 +71,7 @@ type bus struct {
 	mu       sync.Mutex
 	handlers map[string]func(ctx context.Context, env messaging.Envelope) error
 	log      []msgRecord
+	errs     []error
 }
 
 func newBus() *bus {
@@ -100,7 +104,12 @@ func (b *bus) Publish(ctx context.Context, exchange, routingKey, correlationID s
 		// This can be intentional for outcome events that the saga consumes.
 		return nil
 	}
-	return fn(ctx, env)
+	if err := fn(ctx, env); err != nil {
+		b.mu.Lock()
+		b.errs = append(b.errs, fmt.Errorf("dispatch %s: %w", routingKey, err))
+		b.mu.Unlock()
+	}
+	return nil
 }
 
 func (b *bus) messages() []msgRecord {
@@ -108,6 +117,14 @@ func (b *bus) messages() []msgRecord {
 	defer b.mu.Unlock()
 	result := make([]msgRecord, len(b.log))
 	copy(result, b.log)
+	return result
+}
+
+func (b *bus) errors() []error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	result := make([]error, len(b.errs))
+	copy(result, b.errs)
 	return result
 }
 
@@ -134,7 +151,10 @@ type testHarness struct {
 	catalogRepo     *catalogrepository.MemoryRepository
 	catalogConsumer *catalogconsumer.Handler
 
-	// Payments (provider)
+	// Payments
+	paymentsClient   sagaclient.PaymentsClient
+	paymentsRepo     *paymentsrepository.MemoryRepository
+	paymentsConsumer *paymentsconsumer.Handler
 	paymentsProvider *configurableProvider
 }
 
@@ -173,51 +193,79 @@ func (p *configurableProvider) Charge(ctx context.Context, transactionID, _ stri
 	}, nil
 }
 
-// paymentsHTTPClient is a saga payments client backed by an httptest server.
-type paymentsHTTPClient struct {
-	server *httptest.Server
+type paymentsServiceClient struct {
+	service *paymentsservice.Service
 }
 
-func (c *paymentsHTTPClient) RegisterTransaction(_ context.Context, req sagaclient.RegisterTransactionRequest) (*sagaclient.RegisterTransactionResponse, error) {
-	return &sagaclient.RegisterTransactionResponse{ID: req.ID, Status: "pending"}, nil
+func (c *paymentsServiceClient) RegisterTransaction(ctx context.Context, req sagaclient.RegisterTransactionRequest) (*sagaclient.RegisterTransactionResponse, error) {
+	txn, err := c.service.RegisterTransaction(ctx, &paymentsdomain.Transaction{
+		ID:                    req.ID,
+		UserID:                req.UserID,
+		Type:                  paymentsdomain.TransactionType(req.Type),
+		Status:                paymentsdomain.StatusPending,
+		Amount:                req.Amount,
+		Currency:              req.Currency,
+		OfferingID:            req.OfferingID,
+		OriginalTransactionID: req.OriginalTransactionID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &sagaclient.RegisterTransactionResponse{
+		ID:     txn.ID,
+		Status: string(txn.Status),
+	}, nil
 }
 
-func (c *paymentsHTTPClient) GetTransaction(_ context.Context, transactionID string) (*sagaclient.TransactionDetails, error) {
-	offeringID := "offering-1"
+func (c *paymentsServiceClient) GetTransaction(ctx context.Context, transactionID string) (*sagaclient.TransactionDetails, error) {
+	txn, err := c.service.GetTransaction(ctx, transactionID)
+	if err != nil {
+		return nil, err
+	}
 	return &sagaclient.TransactionDetails{
-		ID:         transactionID,
-		UserID:     "user-1",
-		Type:       "purchase",
-		Status:     "completed",
-		Amount:     5000,
-		Currency:   "ARS",
-		OfferingID: &offeringID,
+		ID:                    txn.ID,
+		UserID:                txn.UserID,
+		Type:                  string(txn.Type),
+		Status:                string(txn.Status),
+		Amount:                txn.Amount,
+		Currency:              txn.Currency,
+		OfferingID:            txn.OfferingID,
+		OriginalTransactionID: txn.OriginalTransactionID,
+		ProviderReference:     txn.ProviderReference,
 	}, nil
 }
 
-func (c *paymentsHTTPClient) UpdateTransactionStatus(_ context.Context, _ string, _ string, _ *string, _ *string) error {
-	return nil
+func (c *paymentsServiceClient) UpdateTransactionStatus(ctx context.Context, transactionID string, status string, reason *string, providerReference *string) error {
+	_, err := c.service.UpdateTransactionStatus(ctx, transactionID, paymentsdomain.TransactionStatus(status), reason, providerReference)
+	return err
 }
 
-// catalogHTTPClient is a saga catalog client that always allows.
-type catalogHTTPClient struct {
-	purchaseAllowed bool
-	purchaseReason  string
-	refundAllowed   bool
-	refundReason    string
+type catalogServiceClient struct {
+	service *catalogservice.Service
 }
 
-func (c *catalogHTTPClient) PurchasePrecheck(_ context.Context, _, _ string) (*sagaclient.PrecheckResult, error) {
+func (c *catalogServiceClient) PurchasePrecheck(ctx context.Context, userID, offeringID string) (*sagaclient.PrecheckResult, error) {
+	result, err := c.service.PurchasePrecheck(ctx, userID, offeringID)
+	if err != nil {
+		return nil, err
+	}
 	return &sagaclient.PrecheckResult{
-		Allowed:  c.purchaseAllowed,
-		Reason:   c.purchaseReason,
-		Price:    5000,
-		Currency: "ARS",
+		Allowed:  result.Allowed,
+		Reason:   result.Reason,
+		Price:    result.Price,
+		Currency: result.Currency,
 	}, nil
 }
 
-func (c *catalogHTTPClient) RefundPrecheck(_ context.Context, _, _, _ string) (*sagaclient.PrecheckResult, error) {
-	return &sagaclient.PrecheckResult{Allowed: c.refundAllowed, Reason: c.refundReason}, nil
+func (c *catalogServiceClient) RefundPrecheck(ctx context.Context, userID, offeringID, transactionID string) (*sagaclient.PrecheckResult, error) {
+	result, err := c.service.RefundPrecheck(ctx, userID, offeringID, transactionID)
+	if err != nil {
+		return nil, err
+	}
+	return &sagaclient.PrecheckResult{
+		Allowed: result.Allowed,
+		Reason:  result.Reason,
+	}, nil
 }
 
 func newHarness(t *testing.T) *testHarness {
@@ -238,18 +286,21 @@ func newHarness(t *testing.T) *testHarness {
 
 	// -- Catalog-access --
 	catalogRepo := catalogrepository.NewMemoryRepository()
+	catalogSvc := catalogservice.New(catalogRepo)
 	catalogRepo.Users["user-1"] = &catalogdomain.User{ID: "user-1", Email: "user@test.com", Name: "Test User"}
 	catalogRepo.Offerings["offering-1"] = &catalogdomain.Offering{ID: "offering-1", Name: "Premium Access", Price: 5000, Currency: "ARS", Active: true}
-	catalogConsumer := catalogconsumer.NewHandler(catalogservice.New(catalogRepo), b, logger)
+	catalogConsumer := catalogconsumer.NewHandler(catalogSvc, b, logger)
 
-	// -- Payments (provider) --
+	// -- Payments --
+	paymentsRepo := paymentsrepository.NewMemoryRepository()
+	paymentsSvc := paymentsservice.New(paymentsRepo)
 	provider := &configurableProvider{success: true}
 	paymentsConsumer := paymentsconsumer.NewHandler(processdeposit.New(provider, b, logger), logger)
 
 	// -- Saga --
 	sagaRepo := sagarepository.NewMemoryRepository()
-	paymentsClient := &paymentsHTTPClient{}
-	catalogClient := &catalogHTTPClient{purchaseAllowed: true, refundAllowed: true}
+	paymentsClient := &paymentsServiceClient{service: paymentsSvc}
+	catalogClient := &catalogServiceClient{service: catalogSvc}
 	sagaConsumer := sagaconsumer.NewHandler(sagaRepo, paymentsClient, b, logger)
 	sagaHandler := sagaapi.NewHandler(sagaRepo, catalogClient, paymentsClient, b, 30*time.Second, logger)
 
@@ -289,6 +340,9 @@ func newHarness(t *testing.T) *testHarness {
 		walletConsumer:   walletConsumer,
 		catalogRepo:      catalogRepo,
 		catalogConsumer:  catalogConsumer,
+		paymentsClient:   paymentsClient,
+		paymentsRepo:     paymentsRepo,
+		paymentsConsumer: paymentsConsumer,
 		paymentsProvider: provider,
 	}
 }
@@ -322,6 +376,23 @@ func extractTransactionID(t *testing.T, rec *httptest.ResponseRecorder) string {
 		t.Fatal("empty transaction_id in response")
 	}
 	return resp.Data.TransactionID
+}
+
+func assertNoBusErrors(t *testing.T, h *testHarness) {
+	t.Helper()
+	if errs := h.bus.errors(); len(errs) > 0 {
+		t.Fatalf("unexpected bus errors: %v", errs)
+	}
+}
+
+func mustGetTransaction(t *testing.T, repo *paymentsrepository.MemoryRepository, txnID string) *paymentsdomain.Transaction {
+	t.Helper()
+
+	txn, err := repo.GetTransactionByID(context.Background(), txnID)
+	if err != nil {
+		t.Fatalf("get transaction %s: %v", txnID, err)
+	}
+	return txn
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +450,18 @@ func TestIntegration_PurchaseHappyPath(t *testing.T) {
 	if access.TransactionID != txnID {
 		t.Errorf("access transaction_id = %s, want %s", access.TransactionID, txnID)
 	}
+
+	purchaseTxn := mustGetTransaction(t, h.paymentsRepo, txnID)
+	if purchaseTxn.Status != paymentsdomain.StatusCompleted {
+		t.Errorf("transaction status = %s, want completed", purchaseTxn.Status)
+	}
+	if purchaseTxn.Type != paymentsdomain.TransactionTypePurchase {
+		t.Errorf("transaction type = %s, want purchase", purchaseTxn.Type)
+	}
+	if purchaseTxn.Amount != 5000 {
+		t.Errorf("transaction amount = %d, want 5000", purchaseTxn.Amount)
+	}
+	assertNoBusErrors(t, h)
 
 	// Verify message flow: debit.requested -> debited -> grant.requested -> granted
 	msgs := h.bus.messages()
@@ -446,6 +529,12 @@ func TestIntegration_PurchaseInsufficientFunds(t *testing.T) {
 		t.Error("expected no active access, but got one")
 	}
 
+	purchaseTxn := mustGetTransaction(t, h.paymentsRepo, txnID)
+	if purchaseTxn.Status != paymentsdomain.StatusFailed {
+		t.Errorf("transaction status = %s, want failed", purchaseTxn.Status)
+	}
+	assertNoBusErrors(t, h)
+
 	// Verify message flow: debit.requested -> debit.rejected
 	msgs := h.bus.messages()
 	expectedKeys := []string{
@@ -503,24 +592,38 @@ func TestIntegration_ConcurrentPurchaseSafety(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Both requests should have been accepted (202).
+	txnIDs := make([]string, 0, len(results))
+	denied := 0
 	for i, rec := range results {
-		if rec.Code != http.StatusAccepted {
-			t.Fatalf("request %d: status = %d, want 202; body: %s", i, rec.Code, rec.Body.String())
+		switch rec.Code {
+		case http.StatusAccepted:
+			var resp struct {
+				Data struct {
+					TransactionID string `json:"transaction_id"`
+				} `json:"data"`
+			}
+			if err := json.NewDecoder(bytes.NewReader(rec.Body.Bytes())).Decode(&resp); err != nil {
+				t.Fatalf("request %d: decode response: %v", i, err)
+			}
+			if resp.Data.TransactionID == "" {
+				t.Fatalf("request %d: empty transaction_id in accepted response", i)
+			}
+			txnIDs = append(txnIDs, resp.Data.TransactionID)
+		case http.StatusUnprocessableEntity:
+			var resp httpx.Response
+			if err := json.NewDecoder(bytes.NewReader(rec.Body.Bytes())).Decode(&resp); err != nil {
+				t.Fatalf("request %d: decode error response: %v", i, err)
+			}
+			if resp.Error == nil || resp.Error.Code != "PRECHECK_DENIED" {
+				t.Fatalf("request %d: expected PRECHECK_DENIED, got %+v", i, resp.Error)
+			}
+			denied++
+		default:
+			t.Fatalf("request %d: unexpected status = %d; body: %s", i, rec.Code, rec.Body.String())
 		}
 	}
-
-	// Extract both transaction IDs.
-	txnIDs := make([]string, 2)
-	for i, rec := range results {
-		// Re-read the body since it was already consumed.
-		var resp struct {
-			Data struct {
-				TransactionID string `json:"transaction_id"`
-			} `json:"data"`
-		}
-		json.NewDecoder(bytes.NewReader(rec.Body.Bytes())).Decode(&resp)
-		txnIDs[i] = resp.Data.TransactionID
+	if len(txnIDs) == 0 {
+		t.Fatal("expected at least one accepted purchase request")
 	}
 
 	// Count completed vs failed sagas.
@@ -563,10 +666,18 @@ func TestIntegration_ConcurrentPurchaseSafety(t *testing.T) {
 		t.Errorf("expected at most 1 successful purchase, got %d", successCount)
 	}
 
+	txns, err := h.paymentsRepo.ListTransactionsByUserID(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("list transactions: %v", err)
+	}
+	if len(txns) != len(txnIDs) {
+		t.Errorf("payments transactions = %d, want %d", len(txns), len(txnIDs))
+	}
+
 	// Verify wallet balance is consistent:
 	// If one succeeded: 5000 - 5000 = 0
 	// If one succeeded and one was compensated: 5000 - 5000 + 5000 - 5000 = 0 (net same)
-	// If one failed (insuf funds before debit): 5000 - 5000 = 0
+	// If one was denied at precheck: only the accepted purchase is applied.
 	wallet, err := h.walletRepo.GetWalletByUserID(context.Background(), "user-1")
 	if err != nil {
 		t.Fatalf("get wallet: %v", err)
@@ -574,8 +685,9 @@ func TestIntegration_ConcurrentPurchaseSafety(t *testing.T) {
 	if wallet.Balance < 0 {
 		t.Errorf("wallet balance = %d, should never go negative", wallet.Balance)
 	}
+	assertNoBusErrors(t, h)
 
-	t.Logf("concurrent purchase result: completed=%d, failed=%d, balance=%d", completed, failed, wallet.Balance)
+	t.Logf("concurrent purchase result: completed=%d, failed=%d, denied=%d, balance=%d", completed, failed, denied, wallet.Balance)
 }
 
 // ---------------------------------------------------------------------------
@@ -612,8 +724,7 @@ func TestIntegration_DepositTimeoutHandling(t *testing.T) {
 	}
 
 	// Simulate timeout: the timeout poller transitions the saga to timed_out.
-	paymentsClient := &paymentsHTTPClient{}
-	poller := timeoutusecase.NewTimeoutPoller(h.sagaRepo, paymentsClient, timeoutusecase.TimeoutConfig{
+	poller := timeoutusecase.NewTimeoutPoller(h.sagaRepo, h.paymentsClient, timeoutusecase.TimeoutConfig{
 		PollInterval: 1 * time.Second,
 		SagaTimeout:  30 * time.Second,
 	}, discardLogger())
@@ -679,6 +790,7 @@ func TestIntegration_DepositTimeoutHandling(t *testing.T) {
 	if wallet.Balance != 30000 {
 		t.Errorf("wallet balance = %d, want 30000", wallet.Balance)
 	}
+	assertNoBusErrors(t, h)
 
 	// Verify the poller is constructable (smoke check).
 	_ = poller
@@ -706,6 +818,10 @@ func TestIntegration_RefundHappyPath(t *testing.T) {
 	purchaseSaga, _ := h.sagaRepo.GetSagaByTransactionID(context.Background(), purchaseTxnID)
 	if purchaseSaga.Status != sagadomain.StatusCompleted {
 		t.Fatalf("purchase saga status = %s, want completed", purchaseSaga.Status)
+	}
+	purchaseTxn := mustGetTransaction(t, h.paymentsRepo, purchaseTxnID)
+	if purchaseTxn.Status != paymentsdomain.StatusCompleted {
+		t.Fatalf("purchase transaction status = %s, want completed", purchaseTxn.Status)
 	}
 
 	// Verify wallet was debited (20000 - 5000 = 15000).
@@ -747,6 +863,14 @@ func TestIntegration_RefundHappyPath(t *testing.T) {
 		t.Errorf("refund saga outcome = %v, want succeeded", refundSaga.Outcome)
 	}
 
+	refundTxn := mustGetTransaction(t, h.paymentsRepo, refundTxnID)
+	if refundTxn.Status != paymentsdomain.StatusCompleted {
+		t.Errorf("refund transaction status = %s, want completed", refundTxn.Status)
+	}
+	if refundTxn.OriginalTransactionID == nil || *refundTxn.OriginalTransactionID != purchaseTxnID {
+		t.Errorf("refund original_transaction_id = %v, want %s", refundTxn.OriginalTransactionID, purchaseTxnID)
+	}
+
 	// Verify wallet was credited back (15000 + 5000 = 20000).
 	wallet, _ = h.walletRepo.GetWalletByUserID(context.Background(), "user-1")
 	if wallet.Balance != 20000 {
@@ -758,4 +882,5 @@ func TestIntegration_RefundHappyPath(t *testing.T) {
 	if err == nil {
 		t.Error("expected access to be revoked, but still active")
 	}
+	assertNoBusErrors(t, h)
 }

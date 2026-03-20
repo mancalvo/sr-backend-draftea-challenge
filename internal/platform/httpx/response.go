@@ -41,12 +41,7 @@ func JSON(w http.ResponseWriter, status int, data any) {
 
 // Error writes a JSON error response with the given status code.
 func Error(w http.ResponseWriter, status int, message string) {
-	body, err := marshalEnvelope(Response{
-		Success: false,
-		Error: &ErrorBody{
-			Message: message,
-		},
-	})
+	body, err := MarshalErrorResponse(message, "", nil)
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -56,13 +51,7 @@ func Error(w http.ResponseWriter, status int, message string) {
 
 // ErrorWithCode writes a JSON error response with an explicit error code.
 func ErrorWithCode(w http.ResponseWriter, status int, message, code string) {
-	body, err := marshalEnvelope(Response{
-		Success: false,
-		Error: &ErrorBody{
-			Message: message,
-			Code:    code,
-		},
-	})
+	body, err := MarshalErrorResponse(message, code, nil)
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -73,14 +62,7 @@ func ErrorWithCode(w http.ResponseWriter, status int, message, code string) {
 // ValidationError writes a 422 Unprocessable Entity response with field-level
 // validation details. The fields slice must contain at least one entry.
 func ValidationError(w http.ResponseWriter, fields []FieldError) {
-	body, err := marshalEnvelope(Response{
-		Success: false,
-		Error: &ErrorBody{
-			Message: "Request validation failed",
-			Code:    "VALIDATION_ERROR",
-			Fields:  fields,
-		},
-	})
+	body, err := MarshalErrorResponse("Request validation failed", "VALIDATION_ERROR", fields)
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -106,6 +88,18 @@ func MarshalResponse(status int, data any) ([]byte, error) {
 	return marshalEnvelope(Response{
 		Success: status >= 200 && status < 300,
 		Data:    data,
+	})
+}
+
+// MarshalErrorResponse marshals the standard error envelope for the given values.
+func MarshalErrorResponse(message, code string, fields []FieldError) ([]byte, error) {
+	return marshalEnvelope(Response{
+		Success: false,
+		Error: &ErrorBody{
+			Message: message,
+			Code:    code,
+			Fields:  fields,
+		},
 	})
 }
 
