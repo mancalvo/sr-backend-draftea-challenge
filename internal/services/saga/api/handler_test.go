@@ -979,9 +979,13 @@ func TestHandleRefund_InitiatesWorkflow(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected AccessRevokeRequested payload, got %T", msgs[0].Payload)
 	}
-	// The TransactionID in the revoke request should be the original purchase txn.
-	if revokePayload.TransactionID != "orig-purchase-txn" {
-		t.Errorf("revoke transaction_id = %s, want orig-purchase-txn", revokePayload.TransactionID)
+	// The revoke command payload should carry the refund saga transaction and the
+	// original purchase transaction separately.
+	if revokePayload.TransactionID != txnID {
+		t.Errorf("revoke transaction_id = %s, want %s", revokePayload.TransactionID, txnID)
+	}
+	if revokePayload.OriginalTransactionID != "orig-purchase-txn" {
+		t.Errorf("revoke original_transaction_id = %s, want orig-purchase-txn", revokePayload.OriginalTransactionID)
 	}
 	if revokePayload.UserID != "user-1" {
 		t.Errorf("revoke user_id = %s, want user-1", revokePayload.UserID)

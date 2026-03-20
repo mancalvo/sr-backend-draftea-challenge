@@ -45,9 +45,10 @@ type AccessGrantRequested struct {
 // AccessRevokeRequested is the payload for routing key "access.revoke.requested".
 // Instructs the catalog-access service to revoke access to an offering.
 type AccessRevokeRequested struct {
-	TransactionID string `json:"transaction_id"`
-	UserID        string `json:"user_id"`
-	OfferingID    string `json:"offering_id"`
+	TransactionID         string `json:"transaction_id"`
+	OriginalTransactionID string `json:"original_transaction_id"`
+	UserID                string `json:"user_id"`
+	OfferingID            string `json:"offering_id"`
 }
 
 // ---------- Outcome payloads (published to workflow.outcomes) ----------
@@ -102,18 +103,20 @@ type AccessGrantConflicted struct {
 // AccessRevoked is the payload for routing key "access.revoked".
 // Indicates access was revoked for the user from the offering.
 type AccessRevoked struct {
-	TransactionID string `json:"transaction_id"`
-	UserID        string `json:"user_id"`
-	OfferingID    string `json:"offering_id"`
+	TransactionID         string `json:"transaction_id"`
+	OriginalTransactionID string `json:"original_transaction_id,omitempty"`
+	UserID                string `json:"user_id"`
+	OfferingID            string `json:"offering_id"`
 }
 
 // AccessRevokeRejected is the payload for routing key "access.revoke.rejected".
 // Indicates the access revocation was rejected (e.g. no active access found).
 type AccessRevokeRejected struct {
-	TransactionID string `json:"transaction_id"`
-	UserID        string `json:"user_id"`
-	OfferingID    string `json:"offering_id"`
-	Reason        string `json:"reason"`
+	TransactionID         string `json:"transaction_id"`
+	OriginalTransactionID string `json:"original_transaction_id,omitempty"`
+	UserID                string `json:"user_id"`
+	OfferingID            string `json:"offering_id"`
+	Reason                string `json:"reason"`
 }
 
 // ProviderChargeSucceeded is the payload for routing key "provider.charge.succeeded".

@@ -518,6 +518,51 @@ func TestPurchaseFlow_DuplicateWalletOutcomeRedelivery(t *testing.T) {
 	}
 }
 
+func TestPurchaseFlow_StaleDebitRejectedAfterGrantIgnored(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &recordingPaymentsClient{}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-purchase-stale-reject"
+	step := "purchase_debit"
+	s := createPurchaseSaga(t, repo, txnID, StatusRunning, &step)
+
+	debited := newTestEnvelope(t, messaging.RoutingKeyWalletDebited, txnID, messaging.WalletDebited{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        5000,
+		BalanceAfter:  15000,
+		SourceStep:    "purchase_debit",
+	})
+	if err := handler.HandleOutcome(ctx, debited); err != nil {
+		t.Fatalf("handleWalletDebited: %v", err)
+	}
+
+	rejected := newTestEnvelope(t, messaging.RoutingKeyWalletDebitRejected, txnID, messaging.WalletDebitRejected{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        5000,
+		Reason:        "insufficient funds",
+		SourceStep:    "purchase_debit",
+	})
+	if err := handler.HandleOutcome(ctx, rejected); err != nil {
+		t.Fatalf("handleWalletDebitRejected: %v", err)
+	}
+
+	updated, _ := repo.GetSagaByID(ctx, s.ID)
+	if updated.Status != StatusRunning {
+		t.Fatalf("status = %s, want running", updated.Status)
+	}
+	if updated.CurrentStep == nil || *updated.CurrentStep != "purchase_grant" {
+		t.Fatalf("current_step = %v, want purchase_grant", updated.CurrentStep)
+	}
+	if len(payments.Updates()) != 0 {
+		t.Fatalf("expected stale rejection not to update payments, got %d updates", len(payments.Updates()))
+	}
+}
+
 func TestPurchaseFlow_AccessConflictAfterDebit_Compensation(t *testing.T) {
 	repo := NewMemoryRepository()
 	pub := &recordingPublisher{}
@@ -965,9 +1010,10 @@ func TestRefundFlow_HappyPath(t *testing.T) {
 	// Note: TransactionID in the payload is the original purchase txn,
 	// but CorrelationID is the refund txn ID.
 	env := newTestEnvelope(t, messaging.RoutingKeyAccessRevoked, txnID, messaging.AccessRevoked{
-		TransactionID: "orig-purchase-txn",
-		UserID:        "user-1",
-		OfferingID:    "offering-1",
+		TransactionID:         txnID,
+		OriginalTransactionID: "orig-purchase-txn",
+		UserID:                "user-1",
+		OfferingID:            "offering-1",
 	})
 	if err := handler.HandleOutcome(ctx, env); err != nil {
 		t.Fatalf("handleAccessRevoked: %v", err)
@@ -1059,10 +1105,11 @@ func TestRefundFlow_RevokeRejectedAccessInactive(t *testing.T) {
 
 	// access.revoke.rejected because access is already inactive.
 	env := newTestEnvelope(t, messaging.RoutingKeyAccessRevokeRejected, txnID, messaging.AccessRevokeRejected{
-		TransactionID: "orig-purchase-txn",
-		UserID:        "user-1",
-		OfferingID:    "offering-1",
-		Reason:        "no active access found for this transaction",
+		TransactionID:         txnID,
+		OriginalTransactionID: "orig-purchase-txn",
+		UserID:                "user-1",
+		OfferingID:            "offering-1",
+		Reason:                "no active access found for this transaction",
 	})
 	if err := handler.HandleOutcome(ctx, env); err != nil {
 		t.Fatalf("handleAccessRevokeRejected: %v", err)
@@ -1111,9 +1158,10 @@ func TestRefundFlow_DuplicateRevokeEventHandling(t *testing.T) {
 
 	// First delivery of access.revoked -> should publish wallet.credit.requested.
 	env := newTestEnvelope(t, messaging.RoutingKeyAccessRevoked, txnID, messaging.AccessRevoked{
-		TransactionID: "orig-purchase-txn",
-		UserID:        "user-1",
-		OfferingID:    "offering-1",
+		TransactionID:         txnID,
+		OriginalTransactionID: "orig-purchase-txn",
+		UserID:                "user-1",
+		OfferingID:            "offering-1",
 	})
 	if err := handler.HandleOutcome(ctx, env); err != nil {
 		t.Fatalf("first handleAccessRevoked: %v", err)
@@ -1166,6 +1214,50 @@ func TestRefundFlow_DuplicateRevokeEventHandling(t *testing.T) {
 	final, _ = repo.GetSagaByID(ctx, s.ID)
 	if final.Status != StatusCompleted {
 		t.Errorf("after duplicate on completed saga: status = %s, want completed", final.Status)
+	}
+}
+
+func TestRefundFlow_StaleRevokeRejectedAfterCreditIgnored(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &recordingPaymentsClient{}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-refund-stale-reject"
+	step := "refund_revoke_access"
+	s := createRefundSaga(t, repo, txnID, StatusRunning, &step)
+
+	revoked := newTestEnvelope(t, messaging.RoutingKeyAccessRevoked, txnID, messaging.AccessRevoked{
+		TransactionID:         txnID,
+		OriginalTransactionID: "orig-purchase-txn",
+		UserID:                "user-1",
+		OfferingID:            "offering-1",
+	})
+	if err := handler.HandleOutcome(ctx, revoked); err != nil {
+		t.Fatalf("handleAccessRevoked: %v", err)
+	}
+
+	rejected := newTestEnvelope(t, messaging.RoutingKeyAccessRevokeRejected, txnID, messaging.AccessRevokeRejected{
+		TransactionID:         txnID,
+		OriginalTransactionID: "orig-purchase-txn",
+		UserID:                "user-1",
+		OfferingID:            "offering-1",
+		Reason:                "no active access found",
+	})
+	if err := handler.HandleOutcome(ctx, rejected); err != nil {
+		t.Fatalf("handleAccessRevokeRejected: %v", err)
+	}
+
+	updated, _ := repo.GetSagaByID(ctx, s.ID)
+	if updated.Status != StatusRunning {
+		t.Fatalf("status = %s, want running", updated.Status)
+	}
+	if updated.CurrentStep == nil || *updated.CurrentStep != "refund_credit" {
+		t.Fatalf("current_step = %v, want refund_credit", updated.CurrentStep)
+	}
+	if len(payments.Updates()) != 0 {
+		t.Fatalf("expected stale revoke rejection not to update payments, got %d updates", len(payments.Updates()))
 	}
 }
 
@@ -1543,6 +1635,54 @@ func TestDepositFlow_LateSuccessAfterTimeout(t *testing.T) {
 	}
 	if updates[1].Status != "completed" {
 		t.Errorf("status = %s, want completed", updates[1].Status)
+	}
+}
+
+func TestDepositFlow_StaleProviderFailureAfterSuccessIgnored(t *testing.T) {
+	repo := NewMemoryRepository()
+	pub := &recordingPublisher{}
+	payments := &recordingPaymentsClient{}
+	handler := NewConsumerHandler(repo, payments, pub, discardLogger())
+	ctx := context.Background()
+
+	txnID := "txn-deposit-stale-failure"
+	step := "deposit_charge"
+	s := createDepositSaga(t, repo, txnID, StatusRunning, &step)
+
+	succeeded := newTestEnvelope(t, messaging.RoutingKeyProviderChargeSucceeded, txnID, messaging.ProviderChargeSucceeded{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        10000,
+		ProviderRef:   "sim-" + txnID,
+	})
+	if err := handler.HandleOutcome(ctx, succeeded); err != nil {
+		t.Fatalf("handleProviderChargeSucceeded: %v", err)
+	}
+
+	failed := newTestEnvelope(t, messaging.RoutingKeyProviderChargeFailed, txnID, messaging.ProviderChargeFailed{
+		TransactionID: txnID,
+		UserID:        "user-1",
+		Amount:        10000,
+		Reason:        "provider timeout",
+	})
+	if err := handler.HandleOutcome(ctx, failed); err != nil {
+		t.Fatalf("handleProviderChargeFailed: %v", err)
+	}
+
+	updated, _ := repo.GetSagaByID(ctx, s.ID)
+	if updated.Status != StatusRunning {
+		t.Fatalf("status = %s, want running", updated.Status)
+	}
+	if updated.CurrentStep == nil || *updated.CurrentStep != "deposit_credit" {
+		t.Fatalf("current_step = %v, want deposit_credit", updated.CurrentStep)
+	}
+
+	updates := payments.Updates()
+	if len(updates) != 1 {
+		t.Fatalf("expected only provider success update, got %d updates", len(updates))
+	}
+	if updates[0].Status != "pending" {
+		t.Fatalf("status = %s, want pending", updates[0].Status)
 	}
 }
 

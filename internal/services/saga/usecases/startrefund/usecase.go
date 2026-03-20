@@ -208,9 +208,10 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 	}
 
 	if err := activities.PublishAccessRevokeRequested(ctx, u.publisher, transactionID, messaging.AccessRevokeRequested{
-		TransactionID: cmd.TransactionID,
-		UserID:        cmd.UserID,
-		OfferingID:    cmd.OfferingID,
+		TransactionID:         transactionID,
+		OriginalTransactionID: cmd.TransactionID,
+		UserID:                cmd.UserID,
+		OfferingID:            cmd.OfferingID,
 	}); err != nil {
 		logger.Error("failed to publish access.revoke.requested", "error", err)
 		return nil, u.retryableCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "failed to dispatch refund command", "INITIAL_DISPATCH_FAILED"))

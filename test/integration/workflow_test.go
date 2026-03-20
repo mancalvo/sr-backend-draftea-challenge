@@ -48,6 +48,12 @@ import (
 	walletsservice "github.com/draftea/sr-backend-draftea-challenge/internal/services/wallets/service"
 )
 
+const (
+	testUserID     = "11111111-1111-1111-1111-111111111111"
+	testWalletID   = "22222222-2222-2222-2222-222222222222"
+	testOfferingID = "33333333-3333-3333-3333-333333333333"
+)
+
 // ---------------------------------------------------------------------------
 // Test infrastructure: message bus that routes published messages to handlers
 // ---------------------------------------------------------------------------
@@ -276,9 +282,9 @@ func newHarness(t *testing.T) *testHarness {
 
 	// -- Wallets --
 	walletRepo := walletsrepository.NewMemoryRepository()
-	walletRepo.Wallets["user-1"] = &walletsdomain.Wallet{
-		ID:       "wallet-1",
-		UserID:   "user-1",
+	walletRepo.Wallets[testUserID] = &walletsdomain.Wallet{
+		ID:       testWalletID,
+		UserID:   testUserID,
 		Balance:  20000,
 		Currency: "ARS",
 	}
@@ -287,8 +293,8 @@ func newHarness(t *testing.T) *testHarness {
 	// -- Catalog-access --
 	catalogRepo := catalogrepository.NewMemoryRepository()
 	catalogSvc := catalogservice.New(catalogRepo)
-	catalogRepo.Users["user-1"] = &catalogdomain.User{ID: "user-1", Email: "user@test.com", Name: "Test User"}
-	catalogRepo.Offerings["offering-1"] = &catalogdomain.Offering{ID: "offering-1", Name: "Premium Access", Price: 5000, Currency: "ARS", Active: true}
+	catalogRepo.Users[testUserID] = &catalogdomain.User{ID: testUserID, Email: "user@test.com", Name: "Test User"}
+	catalogRepo.Offerings[testOfferingID] = &catalogdomain.Offering{ID: testOfferingID, Name: "Premium Access", Price: 5000, Currency: "ARS", Active: true}
 	catalogConsumer := catalogconsumer.NewHandler(catalogSvc, b, logger)
 
 	// -- Payments --
@@ -404,8 +410,8 @@ func TestIntegration_PurchaseHappyPath(t *testing.T) {
 
 	// Submit a purchase command.
 	rec := h.postJSON(t, "/purchases", sagaapi.PurchaseCommand{
-		UserID:         "user-1",
-		OfferingID:     "offering-1",
+		UserID:         testUserID,
+		OfferingID:     testOfferingID,
 		IdempotencyKey: "int-pur-happy-1",
 	})
 	if rec.Code != http.StatusAccepted {
@@ -434,7 +440,7 @@ func TestIntegration_PurchaseHappyPath(t *testing.T) {
 	}
 
 	// Verify wallet was debited (20000 - 5000 = 15000).
-	wallet, err := h.walletRepo.GetWalletByUserID(context.Background(), "user-1")
+	wallet, err := h.walletRepo.GetWalletByUserID(context.Background(), testUserID)
 	if err != nil {
 		t.Fatalf("get wallet: %v", err)
 	}
@@ -443,7 +449,7 @@ func TestIntegration_PurchaseHappyPath(t *testing.T) {
 	}
 
 	// Verify access was granted.
-	access, err := h.catalogRepo.GetActiveAccess(context.Background(), "user-1", "offering-1")
+	access, err := h.catalogRepo.GetActiveAccess(context.Background(), testUserID, testOfferingID)
 	if err != nil {
 		t.Fatalf("get active access: %v", err)
 	}
@@ -489,11 +495,11 @@ func TestIntegration_PurchaseInsufficientFunds(t *testing.T) {
 	h := newHarness(t)
 
 	// Set wallet balance to be insufficient.
-	h.walletRepo.Wallets["user-1"].Balance = 1000
+	h.walletRepo.Wallets[testUserID].Balance = 1000
 
 	rec := h.postJSON(t, "/purchases", sagaapi.PurchaseCommand{
-		UserID:         "user-1",
-		OfferingID:     "offering-1",
+		UserID:         testUserID,
+		OfferingID:     testOfferingID,
 		IdempotencyKey: "int-pur-insuf-1",
 	})
 	if rec.Code != http.StatusAccepted {
@@ -515,7 +521,7 @@ func TestIntegration_PurchaseInsufficientFunds(t *testing.T) {
 	}
 
 	// Verify wallet balance was NOT modified.
-	wallet, err := h.walletRepo.GetWalletByUserID(context.Background(), "user-1")
+	wallet, err := h.walletRepo.GetWalletByUserID(context.Background(), testUserID)
 	if err != nil {
 		t.Fatalf("get wallet: %v", err)
 	}
@@ -524,7 +530,7 @@ func TestIntegration_PurchaseInsufficientFunds(t *testing.T) {
 	}
 
 	// Verify no access was granted.
-	_, err = h.catalogRepo.GetActiveAccess(context.Background(), "user-1", "offering-1")
+	_, err = h.catalogRepo.GetActiveAccess(context.Background(), testUserID, testOfferingID)
 	if err == nil {
 		t.Error("expected no active access, but got one")
 	}
@@ -574,7 +580,7 @@ func TestIntegration_ConcurrentPurchaseSafety(t *testing.T) {
 	// We use goroutines to test concurrent HTTP requests.
 
 	h := newHarness(t)
-	h.walletRepo.Wallets["user-1"].Balance = 5000 // Exact amount for one purchase.
+	h.walletRepo.Wallets[testUserID].Balance = 5000 // Exact amount for one purchase.
 
 	var wg sync.WaitGroup
 	results := make([]*httptest.ResponseRecorder, 2)
@@ -584,8 +590,8 @@ func TestIntegration_ConcurrentPurchaseSafety(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			results[idx] = h.postJSON(t, "/purchases", sagaapi.PurchaseCommand{
-				UserID:         "user-1",
-				OfferingID:     "offering-1",
+				UserID:         testUserID,
+				OfferingID:     testOfferingID,
 				IdempotencyKey: fmt.Sprintf("int-pur-concurrent-%d", idx),
 			})
 		}(i)
@@ -666,7 +672,7 @@ func TestIntegration_ConcurrentPurchaseSafety(t *testing.T) {
 		t.Errorf("expected at most 1 successful purchase, got %d", successCount)
 	}
 
-	txns, err := h.paymentsRepo.ListTransactionsByUserID(context.Background(), "user-1")
+	txns, err := h.paymentsRepo.ListTransactionsByUserID(context.Background(), testUserID)
 	if err != nil {
 		t.Fatalf("list transactions: %v", err)
 	}
@@ -678,7 +684,7 @@ func TestIntegration_ConcurrentPurchaseSafety(t *testing.T) {
 	// If one succeeded: 5000 - 5000 = 0
 	// If one succeeded and one was compensated: 5000 - 5000 + 5000 - 5000 = 0 (net same)
 	// If one was denied at precheck: only the accepted purchase is applied.
-	wallet, err := h.walletRepo.GetWalletByUserID(context.Background(), "user-1")
+	wallet, err := h.walletRepo.GetWalletByUserID(context.Background(), testUserID)
 	if err != nil {
 		t.Fatalf("get wallet: %v", err)
 	}
@@ -703,7 +709,7 @@ func TestIntegration_DepositTimeoutHandling(t *testing.T) {
 	delete(h.bus.handlers, messaging.RoutingKeyDepositRequested)
 
 	rec := h.postJSON(t, "/deposits", sagaapi.DepositCommand{
-		UserID:         "user-1",
+		UserID:         testUserID,
 		Amount:         10000,
 		Currency:       "ARS",
 		IdempotencyKey: "int-dep-timeout-1",
@@ -758,7 +764,7 @@ func TestIntegration_DepositTimeoutHandling(t *testing.T) {
 		txnID,
 		messaging.ProviderChargeSucceeded{
 			TransactionID: txnID,
-			UserID:        "user-1",
+			UserID:        testUserID,
 			Amount:        10000,
 			ProviderRef:   "sim-" + txnID,
 		},
@@ -783,7 +789,7 @@ func TestIntegration_DepositTimeoutHandling(t *testing.T) {
 	}
 
 	// Verify wallet was credited (20000 + 10000 = 30000).
-	wallet, err := h.walletRepo.GetWalletByUserID(context.Background(), "user-1")
+	wallet, err := h.walletRepo.GetWalletByUserID(context.Background(), testUserID)
 	if err != nil {
 		t.Fatalf("get wallet: %v", err)
 	}
@@ -805,8 +811,8 @@ func TestIntegration_RefundHappyPath(t *testing.T) {
 
 	// First, complete a purchase so we have an access record to refund.
 	rec := h.postJSON(t, "/purchases", sagaapi.PurchaseCommand{
-		UserID:         "user-1",
-		OfferingID:     "offering-1",
+		UserID:         testUserID,
+		OfferingID:     testOfferingID,
 		IdempotencyKey: "int-ref-purchase-1",
 	})
 	if rec.Code != http.StatusAccepted {
@@ -825,21 +831,21 @@ func TestIntegration_RefundHappyPath(t *testing.T) {
 	}
 
 	// Verify wallet was debited (20000 - 5000 = 15000).
-	wallet, _ := h.walletRepo.GetWalletByUserID(context.Background(), "user-1")
+	wallet, _ := h.walletRepo.GetWalletByUserID(context.Background(), testUserID)
 	if wallet.Balance != 15000 {
 		t.Fatalf("wallet balance after purchase = %d, want 15000", wallet.Balance)
 	}
 
 	// Verify access was granted.
-	_, err := h.catalogRepo.GetActiveAccess(context.Background(), "user-1", "offering-1")
+	_, err := h.catalogRepo.GetActiveAccess(context.Background(), testUserID, testOfferingID)
 	if err != nil {
 		t.Fatalf("no active access after purchase: %v", err)
 	}
 
 	// Now submit a refund.
 	rec = h.postJSON(t, "/refunds", sagaapi.RefundCommand{
-		UserID:         "user-1",
-		OfferingID:     "offering-1",
+		UserID:         testUserID,
+		OfferingID:     testOfferingID,
 		TransactionID:  purchaseTxnID,
 		IdempotencyKey: "int-ref-refund-1",
 	})
@@ -872,13 +878,13 @@ func TestIntegration_RefundHappyPath(t *testing.T) {
 	}
 
 	// Verify wallet was credited back (15000 + 5000 = 20000).
-	wallet, _ = h.walletRepo.GetWalletByUserID(context.Background(), "user-1")
+	wallet, _ = h.walletRepo.GetWalletByUserID(context.Background(), testUserID)
 	if wallet.Balance != 20000 {
 		t.Errorf("wallet balance after refund = %d, want 20000", wallet.Balance)
 	}
 
 	// Verify access was revoked.
-	_, err = h.catalogRepo.GetActiveAccess(context.Background(), "user-1", "offering-1")
+	_, err = h.catalogRepo.GetActiveAccess(context.Background(), testUserID, testOfferingID)
 	if err == nil {
 		t.Error("expected access to be revoked, but still active")
 	}

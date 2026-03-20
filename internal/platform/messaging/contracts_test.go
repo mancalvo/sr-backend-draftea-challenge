@@ -70,13 +70,14 @@ func TestContractRoundTrip(t *testing.T) {
 		{
 			name:       "AccessRevokeRequested",
 			routingKey: RoutingKeyAccessRevokeRequested,
-			payload:    AccessRevokeRequested{TransactionID: "txn-5", UserID: "u-5", OfferingID: "off-2"},
+			payload:    AccessRevokeRequested{TransactionID: "txn-5", OriginalTransactionID: "orig-txn-5", UserID: "u-5", OfferingID: "off-2"},
 			decode: func(env Envelope) error {
 				var p AccessRevokeRequested
 				if err := env.DecodePayload(&p); err != nil {
 					return err
 				}
 				assertEqual(t, "OfferingID", p.OfferingID, "off-2")
+				assertEqual(t, "OriginalTransactionID", p.OriginalTransactionID, "orig-txn-5")
 				return nil
 			},
 		},
@@ -148,26 +149,28 @@ func TestContractRoundTrip(t *testing.T) {
 		{
 			name:       "AccessRevoked",
 			routingKey: RoutingKeyAccessRevoked,
-			payload:    AccessRevoked{TransactionID: "txn-11", UserID: "u-11", OfferingID: "off-5"},
+			payload:    AccessRevoked{TransactionID: "txn-11", OriginalTransactionID: "orig-txn-11", UserID: "u-11", OfferingID: "off-5"},
 			decode: func(env Envelope) error {
 				var p AccessRevoked
 				if err := env.DecodePayload(&p); err != nil {
 					return err
 				}
 				assertEqual(t, "OfferingID", p.OfferingID, "off-5")
+				assertEqual(t, "OriginalTransactionID", p.OriginalTransactionID, "orig-txn-11")
 				return nil
 			},
 		},
 		{
 			name:       "AccessRevokeRejected",
 			routingKey: RoutingKeyAccessRevokeRejected,
-			payload:    AccessRevokeRejected{TransactionID: "txn-12", UserID: "u-12", OfferingID: "off-6", Reason: "no_active_access"},
+			payload:    AccessRevokeRejected{TransactionID: "txn-12", OriginalTransactionID: "orig-txn-12", UserID: "u-12", OfferingID: "off-6", Reason: "no_active_access"},
 			decode: func(env Envelope) error {
 				var p AccessRevokeRejected
 				if err := env.DecodePayload(&p); err != nil {
 					return err
 				}
 				assertEqual(t, "Reason", p.Reason, "no_active_access")
+				assertEqual(t, "OriginalTransactionID", p.OriginalTransactionID, "orig-txn-12")
 				return nil
 			},
 		},

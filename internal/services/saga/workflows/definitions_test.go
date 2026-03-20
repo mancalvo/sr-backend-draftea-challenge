@@ -43,11 +43,11 @@ func TestSagaTransactionIDForOutcome_UsesPayloadTransactionID(t *testing.T) {
 	}
 }
 
-func TestSagaTransactionIDForOutcome_UsesCorrelationIDForRefundRevoke(t *testing.T) {
+func TestSagaTransactionIDForOutcome_UsesPayloadTransactionIDForRefundRevoke(t *testing.T) {
 	env, err := messaging.NewEnvelope(
 		messaging.RoutingKeyAccessRevoked,
 		"refund-txn-1",
-		messaging.AccessRevoked{TransactionID: "purchase-txn-1"},
+		messaging.AccessRevoked{TransactionID: "refund-txn-1", OriginalTransactionID: "purchase-txn-1"},
 	)
 	if err != nil {
 		t.Fatalf("new envelope: %v", err)

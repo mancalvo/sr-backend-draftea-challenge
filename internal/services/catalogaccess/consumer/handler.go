@@ -134,9 +134,9 @@ func (c *Handler) HandleAccessRevokeRequested(ctx context.Context, env messaging
 
 	logger.Info("processing access revoke request")
 
-	_, err := c.service.RevokeAccess(ctx, cmd.TransactionID)
+	_, err := c.service.RevokeAccess(ctx, cmd.OriginalTransactionID)
 	if errors.Is(err, repository.ErrNoActiveAccess) {
-		existing, lookupErr := c.service.GetAccessByTransaction(ctx, cmd.TransactionID)
+		existing, lookupErr := c.service.GetAccessByTransaction(ctx, cmd.OriginalTransactionID)
 		if lookupErr == nil && existing.Status == domain.AccessStatusRevoked {
 			logger.Info("access revoke already applied, replaying access.revoked")
 			return c.publisher.Publish(ctx,
@@ -144,9 +144,10 @@ func (c *Handler) HandleAccessRevokeRequested(ctx context.Context, env messaging
 				messaging.RoutingKeyAccessRevoked,
 				env.CorrelationID,
 				messaging.AccessRevoked{
-					TransactionID: cmd.TransactionID,
-					UserID:        cmd.UserID,
-					OfferingID:    cmd.OfferingID,
+					TransactionID:         cmd.TransactionID,
+					OriginalTransactionID: cmd.OriginalTransactionID,
+					UserID:                cmd.UserID,
+					OfferingID:            cmd.OfferingID,
 				},
 			)
 		}
@@ -161,10 +162,11 @@ func (c *Handler) HandleAccessRevokeRequested(ctx context.Context, env messaging
 			messaging.RoutingKeyAccessRevokeRejected,
 			env.CorrelationID,
 			messaging.AccessRevokeRejected{
-				TransactionID: cmd.TransactionID,
-				UserID:        cmd.UserID,
-				OfferingID:    cmd.OfferingID,
-				Reason:        "no active access found for this transaction",
+				TransactionID:         cmd.TransactionID,
+				OriginalTransactionID: cmd.OriginalTransactionID,
+				UserID:                cmd.UserID,
+				OfferingID:            cmd.OfferingID,
+				Reason:                "no active access found for this transaction",
 			},
 		)
 	}
@@ -179,9 +181,10 @@ func (c *Handler) HandleAccessRevokeRequested(ctx context.Context, env messaging
 		messaging.RoutingKeyAccessRevoked,
 		env.CorrelationID,
 		messaging.AccessRevoked{
-			TransactionID: cmd.TransactionID,
-			UserID:        cmd.UserID,
-			OfferingID:    cmd.OfferingID,
+			TransactionID:         cmd.TransactionID,
+			OriginalTransactionID: cmd.OriginalTransactionID,
+			UserID:                cmd.UserID,
+			OfferingID:            cmd.OfferingID,
 		},
 	)
 }

@@ -173,7 +173,7 @@ func (u *UseCase) publishAccessGrant(ctx context.Context, env messaging.Envelope
 		logger.Info("saga already past debit step, ignoring duplicate wallet.debited")
 		return nil
 	}
-	if s.CurrentStep != nil && *s.CurrentStep != workflows.PurchaseDebitStep {
+	if s.CurrentStep == nil || *s.CurrentStep != workflows.PurchaseDebitStep {
 		logger.Info("wallet.debited does not match current purchase step, ignoring duplicate")
 		return nil
 	}
@@ -183,15 +183,15 @@ func (u *UseCase) publishAccessGrant(ctx context.Context, env messaging.Envelope
 		return err
 	}
 
+	if err := u.updateSagaStep(ctx, s.ID, workflows.PurchaseGrantStep); err != nil {
+		return err
+	}
 	if err := activities.PublishAccessGrantRequested(ctx, u.publisher, s.TransactionID, messaging.AccessGrantRequested{
 		TransactionID: s.TransactionID,
 		UserID:        purchasePayload.UserID,
 		OfferingID:    purchasePayload.OfferingID,
 	}); err != nil {
 		return fmt.Errorf("publish access.grant.requested: %w", err)
-	}
-	if err := u.updateSagaStep(ctx, s.ID, workflows.PurchaseGrantStep); err != nil {
-		return err
 	}
 
 	logger.Info("published access.grant.requested")
@@ -208,6 +208,10 @@ func (u *UseCase) failPurchaseDebit(ctx context.Context, env messaging.Envelope,
 
 	if isSagaTerminal(s) {
 		logger.Info("saga already terminal, ignoring duplicate wallet.debit.rejected")
+		return nil
+	}
+	if s.CurrentStep == nil || *s.CurrentStep != workflows.PurchaseDebitStep {
+		logger.Info("wallet.debit.rejected does not match current purchase step, ignoring stale event")
 		return nil
 	}
 
@@ -247,6 +251,10 @@ func (u *UseCase) completePurchaseCompensation(ctx context.Context, env messagin
 		logger.Info("wallet.credited does not apply to purchase in current status, ignoring")
 		return nil
 	}
+	if s.CurrentStep == nil || *s.CurrentStep != workflows.PurchaseCompensationCreditStep {
+		logger.Info("wallet.credited does not match current purchase compensation step, ignoring stale event")
+		return nil
+	}
 
 	reason := "access grant conflicted, debit reversed"
 	if err := u.payments.UpdateTransactionStatus(ctx, s.TransactionID, "compensated", &reason, nil); err != nil {
@@ -282,6 +290,10 @@ func (u *UseCase) completeDeposit(ctx context.Context, env messaging.Envelope, s
 	}
 	if s.Status != domain.StatusRunning && s.Status != domain.StatusTimedOut {
 		logger.Info("wallet.credited does not apply to deposit in current status, ignoring")
+		return nil
+	}
+	if s.CurrentStep == nil || *s.CurrentStep != workflows.DepositCreditStep {
+		logger.Info("wallet.credited does not match current deposit step, ignoring stale event")
 		return nil
 	}
 
@@ -320,6 +332,10 @@ func (u *UseCase) completeRefund(ctx context.Context, env messaging.Envelope, s 
 		logger.Info("wallet.credited does not apply to refund in current status, ignoring")
 		return nil
 	}
+	if s.CurrentStep == nil || *s.CurrentStep != workflows.RefundCreditStep {
+		logger.Info("wallet.credited does not match current refund step, ignoring stale event")
+		return nil
+	}
 
 	if err := u.payments.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil, nil); err != nil {
 		logger.Error("failed to update transaction to completed", "error", err)
@@ -352,6 +368,10 @@ func (u *UseCase) completePurchase(ctx context.Context, env messaging.Envelope, 
 		logger.Info("saga already terminal, ignoring duplicate access.granted")
 		return nil
 	}
+	if s.CurrentStep == nil || *s.CurrentStep != workflows.PurchaseGrantStep {
+		logger.Info("access.granted does not match current purchase step, ignoring stale event")
+		return nil
+	}
 
 	if err := u.payments.UpdateTransactionStatus(ctx, s.TransactionID, "completed", nil, nil); err != nil {
 		logger.Error("failed to update transaction to completed", "error", err)
@@ -382,6 +402,10 @@ func (u *UseCase) startPurchaseCompensation(ctx context.Context, env messaging.E
 
 	if isSagaTerminal(s) || s.Status == domain.StatusCompensating {
 		logger.Info("saga already past grant step, ignoring duplicate access.grant.conflicted")
+		return nil
+	}
+	if s.CurrentStep == nil || *s.CurrentStep != workflows.PurchaseGrantStep {
+		logger.Info("access.grant.conflicted does not match current purchase step, ignoring stale event")
 		return nil
 	}
 
@@ -419,14 +443,14 @@ func (u *UseCase) publishRefundCredit(ctx context.Context, env messaging.Envelop
 		return fmt.Errorf("decode access.revoked payload: %w", err)
 	}
 
-	logger = logger.With(slog.String("original_transaction_id", payload.TransactionID))
+	logger = logger.With(slog.String("original_transaction_id", payload.OriginalTransactionID))
 	logger.Info("received access.revoked")
 
 	if isSagaTerminal(s) {
 		logger.Info("saga already terminal, ignoring duplicate access.revoked")
 		return nil
 	}
-	if s.CurrentStep != nil && *s.CurrentStep != workflows.RefundRevokeAccessStep {
+	if s.CurrentStep == nil || *s.CurrentStep != workflows.RefundRevokeAccessStep {
 		logger.Info("access.revoked does not match current refund step, ignoring duplicate")
 		return nil
 	}
@@ -436,6 +460,9 @@ func (u *UseCase) publishRefundCredit(ctx context.Context, env messaging.Envelop
 		return err
 	}
 
+	if err := u.updateSagaStep(ctx, s.ID, workflows.RefundCreditStep); err != nil {
+		return err
+	}
 	if err := activities.PublishWalletCreditRequested(ctx, u.publisher, s.TransactionID, messaging.WalletCreditRequested{
 		TransactionID: s.TransactionID,
 		UserID:        refundPayload.UserID,
@@ -444,9 +471,6 @@ func (u *UseCase) publishRefundCredit(ctx context.Context, env messaging.Envelop
 		SourceStep:    workflows.RefundCreditStep,
 	}); err != nil {
 		return fmt.Errorf("publish wallet.credit.requested for refund: %w", err)
-	}
-	if err := u.updateSagaStep(ctx, s.ID, workflows.RefundCreditStep); err != nil {
-		return err
 	}
 
 	logger.Info("published wallet.credit.requested for refund")
@@ -459,11 +483,15 @@ func (u *UseCase) failRefundRevoke(ctx context.Context, env messaging.Envelope, 
 		return fmt.Errorf("decode access.revoke.rejected payload: %w", err)
 	}
 
-	logger = logger.With(slog.String("original_transaction_id", payload.TransactionID))
+	logger = logger.With(slog.String("original_transaction_id", payload.OriginalTransactionID))
 	logger.Info("received access.revoke.rejected", "reason", payload.Reason)
 
 	if isSagaTerminal(s) {
 		logger.Info("saga already terminal, ignoring duplicate access.revoke.rejected")
+		return nil
+	}
+	if s.CurrentStep == nil || *s.CurrentStep != workflows.RefundRevokeAccessStep {
+		logger.Info("access.revoke.rejected does not match current refund step, ignoring stale event")
 		return nil
 	}
 
@@ -499,7 +527,7 @@ func (u *UseCase) recordProviderSuccess(ctx context.Context, env messaging.Envel
 		logger.Info("saga already terminal, ignoring duplicate provider.charge.succeeded")
 		return nil
 	}
-	if s.CurrentStep != nil && *s.CurrentStep != workflows.DepositChargeStep {
+	if s.CurrentStep == nil || *s.CurrentStep != workflows.DepositChargeStep {
 		logger.Info("provider.charge.succeeded does not match current deposit step, ignoring duplicate")
 		return nil
 	}
@@ -523,6 +551,9 @@ func (u *UseCase) recordProviderSuccess(ctx context.Context, env messaging.Envel
 		logger.Info("late provider success on timed_out saga, publishing wallet credit")
 	}
 
+	if err := u.updateSagaStep(ctx, s.ID, step); err != nil {
+		return err
+	}
 	if err := activities.PublishWalletCreditRequested(ctx, u.publisher, s.TransactionID, messaging.WalletCreditRequested{
 		TransactionID: s.TransactionID,
 		UserID:        depositPayload.UserID,
@@ -531,9 +562,6 @@ func (u *UseCase) recordProviderSuccess(ctx context.Context, env messaging.Envel
 		SourceStep:    step,
 	}); err != nil {
 		return fmt.Errorf("publish wallet.credit.requested for deposit: %w", err)
-	}
-	if err := u.updateSagaStep(ctx, s.ID, step); err != nil {
-		return err
 	}
 
 	logger.Info("published wallet.credit.requested for deposit")
@@ -550,6 +578,10 @@ func (u *UseCase) failProviderCharge(ctx context.Context, env messaging.Envelope
 
 	if isSagaTerminal(s) {
 		logger.Info("saga already terminal, ignoring duplicate provider.charge.failed")
+		return nil
+	}
+	if s.CurrentStep == nil || *s.CurrentStep != workflows.DepositChargeStep {
+		logger.Info("provider.charge.failed does not match current deposit step, ignoring stale event")
 		return nil
 	}
 

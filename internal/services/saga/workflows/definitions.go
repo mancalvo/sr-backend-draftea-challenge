@@ -104,10 +104,14 @@ var outcomeSagaTransactionIDLocators = map[string]outcomeLocator{
 		})
 	},
 	messaging.RoutingKeyAccessRevoked: func(env messaging.Envelope) (string, error) {
-		return env.CorrelationID, nil
+		return decodeOutcomeTransactionID[messaging.AccessRevoked](env, func(payload messaging.AccessRevoked) string {
+			return payload.TransactionID
+		})
 	},
 	messaging.RoutingKeyAccessRevokeRejected: func(env messaging.Envelope) (string, error) {
-		return env.CorrelationID, nil
+		return decodeOutcomeTransactionID[messaging.AccessRevokeRejected](env, func(payload messaging.AccessRevokeRejected) string {
+			return payload.TransactionID
+		})
 	},
 	messaging.RoutingKeyProviderChargeSucceeded: func(env messaging.Envelope) (string, error) {
 		return decodeOutcomeTransactionID[messaging.ProviderChargeSucceeded](env, func(payload messaging.ProviderChargeSucceeded) string {

@@ -242,9 +242,10 @@ func TestHandleAccessRevokeRequested_Success(t *testing.T) {
 	ch := NewConsumerHandler(repo, pub, testLogger())
 
 	cmd := messaging.AccessRevokeRequested{
-		TransactionID: "txn-original",
-		UserID:        "user-1",
-		OfferingID:    "offering-1",
+		TransactionID:         "txn-refund",
+		OriginalTransactionID: "txn-original",
+		UserID:                "user-1",
+		OfferingID:            "offering-1",
 	}
 	env := makeEnvelope(t, messaging.RoutingKeyAccessRevokeRequested, cmd)
 
@@ -270,6 +271,16 @@ func TestHandleAccessRevokeRequested_Success(t *testing.T) {
 	if call.RoutingKey != messaging.RoutingKeyAccessRevoked {
 		t.Errorf("routing key = %q, want %q", call.RoutingKey, messaging.RoutingKeyAccessRevoked)
 	}
+	payload, ok := call.Payload.(messaging.AccessRevoked)
+	if !ok {
+		t.Fatalf("expected AccessRevoked payload, got %T", call.Payload)
+	}
+	if payload.TransactionID != "txn-refund" {
+		t.Errorf("transaction_id = %q, want %q", payload.TransactionID, "txn-refund")
+	}
+	if payload.OriginalTransactionID != "txn-original" {
+		t.Errorf("original_transaction_id = %q, want %q", payload.OriginalTransactionID, "txn-original")
+	}
 }
 
 func TestHandleAccessRevokeRequested_NoActiveAccess(t *testing.T) {
@@ -278,9 +289,10 @@ func TestHandleAccessRevokeRequested_NoActiveAccess(t *testing.T) {
 	ch := NewConsumerHandler(repo, pub, testLogger())
 
 	cmd := messaging.AccessRevokeRequested{
-		TransactionID: "txn-nonexistent",
-		UserID:        "user-1",
-		OfferingID:    "offering-1",
+		TransactionID:         "txn-refund",
+		OriginalTransactionID: "txn-nonexistent",
+		UserID:                "user-1",
+		OfferingID:            "offering-1",
 	}
 	env := makeEnvelope(t, messaging.RoutingKeyAccessRevokeRequested, cmd)
 
@@ -297,6 +309,16 @@ func TestHandleAccessRevokeRequested_NoActiveAccess(t *testing.T) {
 	if call.RoutingKey != messaging.RoutingKeyAccessRevokeRejected {
 		t.Errorf("routing key = %q, want %q", call.RoutingKey, messaging.RoutingKeyAccessRevokeRejected)
 	}
+	payload, ok := call.Payload.(messaging.AccessRevokeRejected)
+	if !ok {
+		t.Fatalf("expected AccessRevokeRejected payload, got %T", call.Payload)
+	}
+	if payload.TransactionID != "txn-refund" {
+		t.Errorf("transaction_id = %q, want %q", payload.TransactionID, "txn-refund")
+	}
+	if payload.OriginalTransactionID != "txn-nonexistent" {
+		t.Errorf("original_transaction_id = %q, want %q", payload.OriginalTransactionID, "txn-nonexistent")
+	}
 }
 
 func TestHandleAccessRevokeRequested_AlreadyRevoked(t *testing.T) {
@@ -310,9 +332,10 @@ func TestHandleAccessRevokeRequested_AlreadyRevoked(t *testing.T) {
 	ch := NewConsumerHandler(repo, pub, testLogger())
 
 	cmd := messaging.AccessRevokeRequested{
-		TransactionID: "txn-original",
-		UserID:        "user-1",
-		OfferingID:    "offering-1",
+		TransactionID:         "txn-refund",
+		OriginalTransactionID: "txn-original",
+		UserID:                "user-1",
+		OfferingID:            "offering-1",
 	}
 	env := makeEnvelope(t, messaging.RoutingKeyAccessRevokeRequested, cmd)
 
@@ -327,5 +350,15 @@ func TestHandleAccessRevokeRequested_AlreadyRevoked(t *testing.T) {
 	}
 	if pub.calls[0].RoutingKey != messaging.RoutingKeyAccessRevoked {
 		t.Errorf("routing key = %q, want %q", pub.calls[0].RoutingKey, messaging.RoutingKeyAccessRevoked)
+	}
+	payload, ok := pub.calls[0].Payload.(messaging.AccessRevoked)
+	if !ok {
+		t.Fatalf("expected AccessRevoked payload, got %T", pub.calls[0].Payload)
+	}
+	if payload.TransactionID != "txn-refund" {
+		t.Errorf("transaction_id = %q, want %q", payload.TransactionID, "txn-refund")
+	}
+	if payload.OriginalTransactionID != "txn-original" {
+		t.Errorf("original_transaction_id = %q, want %q", payload.OriginalTransactionID, "txn-original")
 	}
 }
