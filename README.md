@@ -38,9 +38,11 @@ Start here:
 
 ```bash
 cp .env.example .env
-make build
 docker compose up -d
 ```
+
+`make build` is available as an optional local sanity check but is not required;
+`docker compose up` uses a multi-stage Docker build internally.
 
 Traefik exposes the HTTP entry point at `http://localhost:80`.
 

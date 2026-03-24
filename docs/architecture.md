@@ -136,7 +136,13 @@ Additional packages appear only where they are needed:
 - `payments/usecases/processdeposit/`
 - `saga/activities/`
 - `saga/client/`
-- `saga/usecases/...`
+- `saga/usecases/startdeposit/`
+- `saga/usecases/startpurchase/`
+- `saga/usecases/startrefund/`
+- `saga/usecases/handleoutcome/`
+- `saga/usecases/timeout/`
+- `saga/usecases/idempotency/`
+- `saga/usecases/commanderror/`
 - `saga/workflows/`
 
 Shared technical code lives in `internal/platform/`.

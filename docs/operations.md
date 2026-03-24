@@ -47,9 +47,12 @@ Traefik listens on `http://localhost:80`.
 
 ## Health Checks
 
-Every service exposes:
+Every service exposes `GET /health` on its own port. Traefik does **not** route
+`/health` externally, so you must reach it via the internal service port:
 
-- `GET /health`
+```bash
+docker exec sr-backend-draftea-challenge-payments-1 wget -qO- http://localhost:8082/health
+```
 
 The response is a plain JSON body with:
 
@@ -61,6 +64,8 @@ The endpoint returns:
 
 - `200` when the service and dependencies are healthy
 - `503` when at least one readiness checker is degraded
+
+Docker Compose uses these endpoints as container health checks automatically.
 
 ## Main API Routes
 
@@ -165,6 +170,13 @@ Important environment variables:
 - `CATALOG_ACCESS_URL`
 - `PAYMENTS_URL`
 
+### Service Ports
+
+- `SAGA_ORCHESTRATOR_PORT`
+- `PAYMENTS_PORT`
+- `WALLETS_PORT`
+- `CATALOG_ACCESS_PORT`
+
 ### Timing
 
 - `SAGA_TIMEOUT`
@@ -212,9 +224,9 @@ workflow across services:
 ```bash
 make test
 make test-integration
-make test-observability
+make test-observability   # not included in make check
 make vet
 make fmt
-make check
+make check                # runs: fmt, vet, test, test-integration, check-migrations, check-compose, build
 docker compose logs -f saga-orchestrator
 ```

@@ -58,9 +58,10 @@ end-to-end environment.
 
 The observability suite checks:
 
-- health endpoints
+- health endpoints (per-service and readiness checker behavior)
 - structured logging keys
 - broker publish and consume logging
+- middleware correlation ID propagation
 
 ## Why This Test Strategy Is Appropriate
 

@@ -34,12 +34,17 @@
 ### Internal Structure
 
 - `api/` command ingress
+- `consumer/` RabbitMQ outcome handler
+- `client/` HTTP clients for payments and catalog-access
+- `domain/` saga model and legal state transitions
+- `repository/` saga persistence (postgres and in-memory)
 - `usecases/startdeposit`
 - `usecases/startpurchase`
 - `usecases/startrefund`
 - `usecases/handleoutcome`
 - `usecases/timeout`
 - `usecases/idempotency`
+- `usecases/commanderror` structured command error handling
 - `workflows/` static workflow definitions
 - `activities/` command publishing and ledger update helpers
 
