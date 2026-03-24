@@ -16,7 +16,7 @@ type Publisher interface {
 
 // Provider executes the external provider charge.
 type Provider interface {
-	Charge(ctx context.Context, transactionID, userID string, amount int64, currency string) (*ChargeResult, error)
+	Charge(ctx context.Context, cmd messaging.DepositRequested) (*ChargeResult, error)
 }
 
 // ChargeResult holds the outcome of a provider charge attempt.
@@ -51,7 +51,7 @@ func (u *UseCase) Execute(ctx context.Context, env messaging.Envelope, cmd messa
 
 	logger.Info("processing deposit request via provider")
 
-	result, err := u.provider.Charge(ctx, cmd.TransactionID, cmd.UserID, cmd.Amount, cmd.Currency)
+	result, err := u.provider.Charge(ctx, cmd)
 	if err != nil {
 		logger.Error("provider charge error", "error", err)
 		return fmt.Errorf("provider charge: %w", err)

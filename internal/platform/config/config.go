@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -45,6 +46,19 @@ func GetEnvDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	v, err := time.ParseDuration(s)
+	if err != nil {
+		return fallback
+	}
+	return v
+}
+
+// GetEnvBool returns the boolean value of an environment variable or a default.
+func GetEnvBool(key string, fallback bool) bool {
+	s := strings.TrimSpace(strings.ToLower(GetEnv(key, "")))
+	if s == "" {
+		return fallback
+	}
+	v, err := strconv.ParseBool(s)
 	if err != nil {
 		return fallback
 	}

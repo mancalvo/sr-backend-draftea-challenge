@@ -56,6 +56,7 @@ type Command struct {
 	Amount         int64
 	Currency       string
 	IdempotencyKey string
+	MockProvider   *messaging.MockProviderControls
 }
 
 // UseCase starts deposit sagas.
@@ -93,9 +94,10 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 
 	scope := string(domain.SagaTypeDeposit)
 	requestHash := idempotency.RequestFingerprint(workflows.DepositPayload{
-		UserID:   cmd.UserID,
-		Amount:   cmd.Amount,
-		Currency: cmd.Currency,
+		UserID:       cmd.UserID,
+		Amount:       cmd.Amount,
+		Currency:     cmd.Currency,
+		MockProvider: cmd.MockProvider,
 	})
 
 	transactionID := uuid.New().String()
@@ -134,9 +136,10 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 	}
 
 	payload, err := json.Marshal(workflows.DepositPayload{
-		UserID:   cmd.UserID,
-		Amount:   cmd.Amount,
-		Currency: cmd.Currency,
+		UserID:       cmd.UserID,
+		Amount:       cmd.Amount,
+		Currency:     cmd.Currency,
+		MockProvider: cmd.MockProvider,
 	})
 	if err != nil {
 		logger.Error("failed to marshal deposit payload", "error", err)
@@ -169,6 +172,7 @@ func (u *UseCase) Execute(ctx context.Context, cmd Command) (*Result, error) {
 		UserID:        cmd.UserID,
 		Amount:        cmd.Amount,
 		Currency:      cmd.Currency,
+		MockProvider:  cmd.MockProvider,
 	}); err != nil {
 		logger.Error("failed to publish payments.deposit.requested", "error", err)
 		return nil, u.retryableCommandError(ctx, scope, cmd.IdempotencyKey, commanderror.New(http.StatusBadGateway, "failed to dispatch deposit command", "INITIAL_DISPATCH_FAILED"))

@@ -16,11 +16,13 @@
 cp .env.example .env
 ```
 
-### 2. Build
+### 2. Build (Optional)
 
 ```bash
 make build
 ```
+
+*Note: This step is completely optional. It only compiles the binaries locally to your host machine as a quick sanity check. Starting the stack with Docker uses a multi-stage build that compiles everything internally.*
 
 ### 3. Start The Full Stack
 
@@ -91,6 +93,36 @@ workflow is successfully started.
 }
 ```
 
+Deposits are asynchronous. `POST /deposits` returns `202 Accepted` with a
+`pending` transaction first, and the wallet balance updates after the mock
+provider finishes. In the default local stack that delay is `500ms`, and you
+can override it with `PROVIDER_CHARGE_TIMEOUT`.
+
+For dev-only flow testing, you can also override the mock provider per request
+with headers when `ENABLE_MOCK_PROVIDER_CONTROLS=true`:
+
+```bash
+curl -s -X POST http://localhost/deposits \
+  -H "Content-Type: application/json" \
+  -H "X-Mock-Provider-Delay: 5s" \
+  -H "X-Mock-Provider-Result: fail" \
+  -d '{
+    "user_id": "11111111-1111-1111-1111-111111111111",
+    "amount": 5000,
+    "currency": "ARS",
+    "idempotency_key": "deposit-mock-001"
+  }'
+```
+
+`X-Mock-Provider-Delay` accepts a Go duration like `500ms`, `2s`, or `35s`.
+`X-Mock-Provider-Result` accepts `success` or `fail`.
+
+To inspect the workflow state, query the transaction directly:
+
+```bash
+curl -s http://localhost/transactions/<transaction_id>
+```
+
 ### Purchase
 
 ```json
@@ -139,6 +171,10 @@ Important environment variables:
 - `TIMEOUT_POLL_INTERVAL`
 - `SYNC_HTTP_TIMEOUT`
 - `PROVIDER_CHARGE_TIMEOUT`
+- `ENABLE_MOCK_PROVIDER_CONTROLS`
+
+If you want to exercise the timeout path manually, set
+`PROVIDER_CHARGE_TIMEOUT` to a value larger than `SAGA_TIMEOUT`.
 
 ## Migrations
 

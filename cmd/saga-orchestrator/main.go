@@ -80,9 +80,10 @@ func main() {
 	// Saga timeout configuration
 	sagaTimeout := config.GetEnvDuration("SAGA_TIMEOUT", 30*time.Second)
 	pollInterval := config.GetEnvDuration("TIMEOUT_POLL_INTERVAL", 5*time.Second)
+	enableMockProviderControls := config.GetEnvBool("ENABLE_MOCK_PROVIDER_CONTROLS", false)
 
 	// Handlers
-	httpHandler := sagaapi.NewHandler(repo, catalogClient, paymentsClient, rmqRuntime.Publisher, sagaTimeout, logger)
+	httpHandler := sagaapi.NewHandler(repo, catalogClient, paymentsClient, rmqRuntime.Publisher, sagaTimeout, logger, enableMockProviderControls)
 	amqpHandler := sagaconsumer.NewHandler(repo, paymentsClient, rmqRuntime.Publisher, logger)
 
 	// Timeout poller

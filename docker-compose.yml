@@ -72,6 +72,7 @@ services:
       SAGA_TIMEOUT: 30s
       TIMEOUT_POLL_INTERVAL: 5s
       SYNC_HTTP_TIMEOUT: 2s
+      ENABLE_MOCK_PROVIDER_CONTROLS: "true"
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,7 +102,8 @@ services:
       RABBITMQ_PORT: "5672"
       RABBITMQ_USER: ${RABBITMQ_USER:-guest}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
-      PROVIDER_CHARGE_TIMEOUT: 30s
+      PROVIDER_CHARGE_TIMEOUT: 500ms
+      ENABLE_MOCK_PROVIDER_CONTROLS: "true"
     depends_on:
       postgres:
         condition: service_healthy

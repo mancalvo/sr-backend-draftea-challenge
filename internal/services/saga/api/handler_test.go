@@ -296,11 +296,15 @@ func newTestRouter(handler *Handler) http.Handler {
 }
 
 func newTestHandler(repo Repository, catalog CatalogClient, payments PaymentsClient) *Handler {
-	return newTestHandlerWithPublisher(repo, catalog, payments, &mockPublisher{})
+	return newTestHandlerWithOptions(repo, catalog, payments, &mockPublisher{}, false)
 }
 
 func newTestHandlerWithPublisher(repo Repository, catalog CatalogClient, payments PaymentsClient, publisher activities.Publisher) *Handler {
-	return NewHandler(repo, catalog, payments, publisher, 30*time.Second, testLogger())
+	return newTestHandlerWithOptions(repo, catalog, payments, publisher, false)
+}
+
+func newTestHandlerWithOptions(repo Repository, catalog CatalogClient, payments PaymentsClient, publisher activities.Publisher, enableMockProviderControls bool) *Handler {
+	return NewHandler(repo, catalog, payments, publisher, 30*time.Second, testLogger(), enableMockProviderControls)
 }
 
 // ---- POST /deposits ----
@@ -338,6 +342,115 @@ func TestHandleDeposit_Success(t *testing.T) {
 	}
 	if data["status"] != "pending" {
 		t.Errorf("status = %v, want pending", data["status"])
+	}
+}
+
+func TestHandleDeposit_MockProviderHeaders_PublishedWhenEnabled(t *testing.T) {
+	repo := NewMemoryRepository()
+	payments := &mockPaymentsClient{}
+	pub := &recordingPublisher{}
+	handler := newTestHandlerWithOptions(repo, &mockCatalogClient{}, payments, pub, true)
+	router := newTestRouter(handler)
+
+	body, _ := json.Marshal(DepositCommand{
+		UserID:         "user-1",
+		Amount:         10000,
+		Currency:       "ARS",
+		IdempotencyKey: "dep-key-mock-1",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerMockProviderDelay, "1500ms")
+	req.Header.Set(headerMockProviderResult, "fail")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+
+	messages := pub.Messages()
+	if len(messages) != 1 {
+		t.Fatalf("published messages = %d, want 1", len(messages))
+	}
+	deposit, ok := messages[0].Payload.(messaging.DepositRequested)
+	if !ok {
+		t.Fatalf("payload type = %T, want messaging.DepositRequested", messages[0].Payload)
+	}
+	if deposit.MockProvider == nil {
+		t.Fatal("expected mock provider controls to be published")
+	}
+	if deposit.MockProvider.Delay != "1.5s" {
+		t.Fatalf("delay = %q, want 1.5s", deposit.MockProvider.Delay)
+	}
+	if deposit.MockProvider.Result != "fail" {
+		t.Fatalf("result = %q, want fail", deposit.MockProvider.Result)
+	}
+}
+
+func TestHandleDeposit_MockProviderHeaders_Disabled(t *testing.T) {
+	repo := NewMemoryRepository()
+	handler := newTestHandler(repo, &mockCatalogClient{}, &mockPaymentsClient{})
+	router := newTestRouter(handler)
+
+	body, _ := json.Marshal(DepositCommand{
+		UserID:         "user-1",
+		Amount:         10000,
+		Currency:       "ARS",
+		IdempotencyKey: "dep-key-mock-disabled",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerMockProviderDelay, "2s")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandleDeposit_MockProviderHeaders_InvalidDelay(t *testing.T) {
+	repo := NewMemoryRepository()
+	handler := newTestHandlerWithOptions(repo, &mockCatalogClient{}, &mockPaymentsClient{}, &mockPublisher{}, true)
+	router := newTestRouter(handler)
+
+	body, _ := json.Marshal(DepositCommand{
+		UserID:         "user-1",
+		Amount:         10000,
+		Currency:       "ARS",
+		IdempotencyKey: "dep-key-mock-invalid-delay",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerMockProviderDelay, "soon")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandleDeposit_MockProviderHeaders_InvalidResult(t *testing.T) {
+	repo := NewMemoryRepository()
+	handler := newTestHandlerWithOptions(repo, &mockCatalogClient{}, &mockPaymentsClient{}, &mockPublisher{}, true)
+	router := newTestRouter(handler)
+
+	body, _ := json.Marshal(DepositCommand{
+		UserID:         "user-1",
+		Amount:         10000,
+		Currency:       "ARS",
+		IdempotencyKey: "dep-key-mock-invalid-result",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/deposits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerMockProviderResult, "maybe")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }
 
@@ -917,7 +1030,7 @@ func TestHandleRefund_InitiatesWorkflow(t *testing.T) {
 		refundResult: &PrecheckResult{Allowed: true},
 	}
 	payments := &mockPaymentsClient{}
-	h := NewHandler(repo, catalog, payments, pub, 30*time.Second, testLogger())
+	h := NewHandler(repo, catalog, payments, pub, 30*time.Second, testLogger(), false)
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(RefundCommand{
@@ -1059,7 +1172,7 @@ func TestHandleDeposit_InitiatesWorkflow(t *testing.T) {
 	repo := NewMemoryRepository()
 	pub := &recordingPublisher{}
 	payments := &mockPaymentsClient{}
-	h := NewHandler(repo, &mockCatalogClient{}, payments, pub, 30*time.Second, testLogger())
+	h := NewHandler(repo, &mockCatalogClient{}, payments, pub, 30*time.Second, testLogger(), false)
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(DepositCommand{
@@ -1293,7 +1406,7 @@ func TestHandlePurchase_UsesAuthoritativeCatalogPricing(t *testing.T) {
 	}
 	payments := &mockPaymentsClient{}
 	pub := &recordingPublisher{}
-	handler := NewHandler(repo, catalog, payments, pub, 30*time.Second, testLogger())
+	handler := NewHandler(repo, catalog, payments, pub, 30*time.Second, testLogger(), false)
 	router := newTestRouter(handler)
 
 	body, _ := json.Marshal(PurchaseCommand{
@@ -1374,7 +1487,7 @@ func TestCommandIngress_CreatesRunningSagaWithoutFollowupTransition(t *testing.T
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := newNoTransitionRepo()
-			handler := NewHandler(repo, tt.catalog, tt.payments, &mockPublisher{}, 30*time.Second, testLogger())
+			handler := NewHandler(repo, tt.catalog, tt.payments, &mockPublisher{}, 30*time.Second, testLogger(), false)
 			router := newTestRouter(handler)
 
 			req := httptest.NewRequest(http.MethodPost, tt.path, bytes.NewReader(tt.body))
@@ -1437,7 +1550,7 @@ func TestHandleRefund_UsesOriginalTransactionMoney(t *testing.T) {
 		},
 	}
 	pub := &recordingPublisher{}
-	handler := NewHandler(repo, catalog, payments, pub, 30*time.Second, testLogger())
+	handler := NewHandler(repo, catalog, payments, pub, 30*time.Second, testLogger(), false)
 	router := newTestRouter(handler)
 
 	body, _ := json.Marshal(RefundCommand{

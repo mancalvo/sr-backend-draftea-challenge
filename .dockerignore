@@ -1,0 +1,12 @@
+.git
+.gocache
+.gocache-review
+bin
+docs
+test
+deploy
+db/seeds
+*.md
+.env*
+Makefile
+.cz.toml

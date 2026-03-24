@@ -65,6 +65,7 @@ func TestHealth_SagaOrchestrator(t *testing.T) {
 		&noopPublisher{},
 		30*time.Second,
 		discardLogger(),
+		false,
 	)
 	router := sagaapi.NewRouter(h, discardLogger())
 	assertHealthOK(t, router, "saga-orchestrator")

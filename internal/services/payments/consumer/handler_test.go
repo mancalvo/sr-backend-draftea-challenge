@@ -53,7 +53,7 @@ type mockProvider struct {
 	seenTransactions  map[string]*ChargeResult
 }
 
-func (m *mockProvider) Charge(_ context.Context, transactionID, _ string, _ int64, _ string) (*ChargeResult, error) {
+func (m *mockProvider) Charge(_ context.Context, cmd messaging.DepositRequested) (*ChargeResult, error) {
 	m.callCount++
 	if m.err != nil {
 		return nil, m.err
@@ -61,17 +61,17 @@ func (m *mockProvider) Charge(_ context.Context, transactionID, _ string, _ int6
 	if m.seenTransactions == nil {
 		m.seenTransactions = make(map[string]*ChargeResult)
 	}
-	if cached, ok := m.seenTransactions[transactionID]; ok {
+	if cached, ok := m.seenTransactions[cmd.TransactionID]; ok {
 		result := *cached
 		return &result, nil
 	}
 
 	m.uniqueChargeCount++
 	if m.result == nil {
-		m.result = &ChargeResult{Success: true, ProviderRef: "ref-" + transactionID}
+		m.result = &ChargeResult{Success: true, ProviderRef: "ref-" + cmd.TransactionID}
 	}
 	stored := *m.result
-	m.seenTransactions[transactionID] = &stored
+	m.seenTransactions[cmd.TransactionID] = &stored
 	return &stored, nil
 }
 

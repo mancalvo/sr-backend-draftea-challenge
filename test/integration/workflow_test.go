@@ -196,7 +196,7 @@ type configurableProvider struct {
 	reason  string
 }
 
-func (p *configurableProvider) Charge(ctx context.Context, transactionID, _ string, _ int64, _ string) (*processdeposit.ChargeResult, error) {
+func (p *configurableProvider) Charge(ctx context.Context, cmd messaging.DepositRequested) (*processdeposit.ChargeResult, error) {
 	p.mu.Lock()
 	d := p.delay
 	success := p.success
@@ -214,7 +214,7 @@ func (p *configurableProvider) Charge(ctx context.Context, transactionID, _ stri
 	if success {
 		return &processdeposit.ChargeResult{
 			Success:     true,
-			ProviderRef: "sim-" + transactionID,
+			ProviderRef: "sim-" + cmd.TransactionID,
 		}, nil
 	}
 	return &processdeposit.ChargeResult{
@@ -332,7 +332,7 @@ func newHarness(t *testing.T) *testHarness {
 	paymentsClient := &paymentsServiceClient{service: paymentsSvc}
 	catalogClient := &catalogServiceClient{service: catalogSvc}
 	sagaConsumer := sagaconsumer.NewHandler(sagaRepo, paymentsClient, b, logger)
-	sagaHandler := sagaapi.NewHandler(sagaRepo, catalogClient, paymentsClient, b, 30*time.Second, logger)
+	sagaHandler := sagaapi.NewHandler(sagaRepo, catalogClient, paymentsClient, b, 30*time.Second, logger, false)
 
 	// Wire up the bus:
 	// Commands -> service handlers

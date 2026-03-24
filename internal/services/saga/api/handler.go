@@ -4,9 +4,11 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/httpx"
+	"github.com/draftea/sr-backend-draftea-challenge/internal/platform/messaging"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/activities"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/client"
 	"github.com/draftea/sr-backend-draftea-challenge/internal/services/saga/repository"
@@ -22,10 +24,16 @@ const DefaultSagaTimeout = 30 * time.Second
 
 // Handler provides HTTP handlers for the saga-orchestrator command ingress.
 type Handler struct {
-	startDeposit  *startdeposit.UseCase
-	startPurchase *startpurchase.UseCase
-	startRefund   *startrefund.UseCase
+	startDeposit                *startdeposit.UseCase
+	startPurchase               *startpurchase.UseCase
+	startRefund                 *startrefund.UseCase
+	mockProviderControlsEnabled bool
 }
+
+const (
+	headerMockProviderDelay  = "X-Mock-Provider-Delay"
+	headerMockProviderResult = "X-Mock-Provider-Result"
+)
 
 // NewHandler creates a new Handler.
 func NewHandler(
@@ -35,6 +43,7 @@ func NewHandler(
 	publisher activities.Publisher,
 	sagaTimeout time.Duration,
 	logger *slog.Logger,
+	enableMockProviderControls bool,
 ) *Handler {
 	if sagaTimeout == 0 {
 		sagaTimeout = DefaultSagaTimeout
@@ -60,6 +69,7 @@ func NewHandler(
 			idempotencyService,
 			sagaTimeout,
 		),
+		mockProviderControlsEnabled: enableMockProviderControls,
 	}
 }
 
@@ -78,12 +88,18 @@ func (h *Handler) HandleDeposit(w http.ResponseWriter, r *http.Request) {
 	if cmd.Currency == "" {
 		cmd.Currency = "ARS"
 	}
+	mockProvider, headerErr := parseMockProviderControls(r, h.mockProviderControlsEnabled)
+	if headerErr != nil {
+		httpx.ErrorWithCode(w, headerErr.status, headerErr.message, headerErr.code)
+		return
+	}
 
 	result, err := h.startDeposit.Execute(r.Context(), startdeposit.Command{
 		UserID:         cmd.UserID,
 		Amount:         cmd.Amount,
 		Currency:       cmd.Currency,
 		IdempotencyKey: cmd.IdempotencyKey,
+		MockProvider:   mockProvider,
 	})
 	if writeCommandError(w, err) {
 		return
@@ -212,6 +228,55 @@ func validateDepositCommand(cmd *DepositCommand) []httpx.FieldError {
 		fields = append(fields, httpx.FieldError{Field: "idempotency_key", Code: "required"})
 	}
 	return fields
+}
+
+type mockProviderHeaderError struct {
+	status  int
+	code    string
+	message string
+}
+
+func parseMockProviderControls(r *http.Request, enabled bool) (*messaging.MockProviderControls, *mockProviderHeaderError) {
+	rawDelay := strings.TrimSpace(r.Header.Get(headerMockProviderDelay))
+	rawResult := strings.ToLower(strings.TrimSpace(r.Header.Get(headerMockProviderResult)))
+	if rawDelay == "" && rawResult == "" {
+		return nil, nil
+	}
+	if !enabled {
+		return nil, &mockProviderHeaderError{
+			status:  http.StatusBadRequest,
+			code:    "MOCK_PROVIDER_CONTROLS_DISABLED",
+			message: "mock provider controls are disabled",
+		}
+	}
+
+	controls := &messaging.MockProviderControls{}
+	if rawDelay != "" {
+		delay, err := time.ParseDuration(rawDelay)
+		if err != nil || delay < 0 {
+			return nil, &mockProviderHeaderError{
+				status:  http.StatusBadRequest,
+				code:    "INVALID_MOCK_PROVIDER_DELAY",
+				message: "X-Mock-Provider-Delay must be a valid non-negative duration",
+			}
+		}
+		controls.Delay = delay.String()
+	}
+
+	if rawResult != "" {
+		switch rawResult {
+		case "success", "fail":
+			controls.Result = rawResult
+		default:
+			return nil, &mockProviderHeaderError{
+				status:  http.StatusBadRequest,
+				code:    "INVALID_MOCK_PROVIDER_RESULT",
+				message: "X-Mock-Provider-Result must be either success or fail",
+			}
+		}
+	}
+
+	return controls, nil
 }
 
 // validatePurchaseCommand returns field-level validation errors for a purchase command.

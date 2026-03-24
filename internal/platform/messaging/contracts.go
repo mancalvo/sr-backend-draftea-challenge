@@ -5,13 +5,20 @@ package messaging
 
 // ---------- Command payloads (published to workflow.commands) ----------
 
+// MockProviderControls carries optional dev-only controls for the mock provider.
+type MockProviderControls struct {
+	Delay  string `json:"delay,omitempty"`
+	Result string `json:"result,omitempty"`
+}
+
 // DepositRequested is the payload for routing key "payments.deposit.requested".
 // Instructs the payments service to execute a deposit via the external provider.
 type DepositRequested struct {
-	TransactionID string `json:"transaction_id"`
-	UserID        string `json:"user_id"`
-	Amount        int64  `json:"amount"`
-	Currency      string `json:"currency"`
+	TransactionID string                `json:"transaction_id"`
+	UserID        string                `json:"user_id"`
+	Amount        int64                 `json:"amount"`
+	Currency      string                `json:"currency"`
+	MockProvider  *MockProviderControls `json:"mock_provider,omitempty"`
 }
 
 // WalletDebitRequested is the payload for routing key "wallet.debit.requested".

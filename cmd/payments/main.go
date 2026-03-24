@@ -70,9 +70,12 @@ func main() {
 	}
 	defer rmqRuntime.Close()
 
-	// Provider (mock implementation for local development)
-	providerTimeout := config.GetEnvDuration("PROVIDER_CHARGE_TIMEOUT", 30*time.Second)
-	provider := paymentsprovider.NewMockProvider(providerTimeout)
+	// Provider (mock implementation for local development). Keep the default
+	// short so deposits settle quickly unless the environment explicitly wants
+	// to exercise timeout behavior.
+	providerTimeout := config.GetEnvDuration("PROVIDER_CHARGE_TIMEOUT", 500*time.Millisecond)
+	enableMockProviderControls := config.GetEnvBool("ENABLE_MOCK_PROVIDER_CONTROLS", false)
+	provider := paymentsprovider.NewMockProvider(providerTimeout, enableMockProviderControls)
 
 	// Handlers
 	httpHandler := paymentsapi.NewHandler(paymentsservice.New(repo), logger)

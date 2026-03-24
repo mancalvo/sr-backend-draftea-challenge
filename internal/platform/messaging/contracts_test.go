@@ -17,7 +17,16 @@ func TestContractRoundTrip(t *testing.T) {
 		{
 			name:       "DepositRequested",
 			routingKey: RoutingKeyDepositRequested,
-			payload:    DepositRequested{TransactionID: "txn-1", UserID: "u-1", Amount: 5000, Currency: "ARS"},
+			payload: DepositRequested{
+				TransactionID: "txn-1",
+				UserID:        "u-1",
+				Amount:        5000,
+				Currency:      "ARS",
+				MockProvider: &MockProviderControls{
+					Delay:  "2s",
+					Result: "fail",
+				},
+			},
 			decode: func(env Envelope) error {
 				var p DepositRequested
 				if err := env.DecodePayload(&p); err != nil {
@@ -25,6 +34,11 @@ func TestContractRoundTrip(t *testing.T) {
 				}
 				assertEqual(t, "TransactionID", p.TransactionID, "txn-1")
 				assertEqual(t, "Amount", p.Amount, int64(5000))
+				if p.MockProvider == nil {
+					t.Fatal("expected mock provider controls")
+				}
+				assertEqual(t, "Delay", p.MockProvider.Delay, "2s")
+				assertEqual(t, "Result", p.MockProvider.Result, "fail")
 				return nil
 			},
 		},

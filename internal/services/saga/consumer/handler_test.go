@@ -830,7 +830,7 @@ func TestPurchaseFlow_HandlerPurchaseInitiatesWorkflow(t *testing.T) {
 		purchaseResult: &PrecheckResult{Allowed: true},
 	}
 	payments := &mockPaymentsClient{}
-	h := sagaapi.NewHandler(repo, catalog, payments, pub, 30*time.Second, discardLogger())
+	h := sagaapi.NewHandler(repo, catalog, payments, pub, 30*time.Second, discardLogger(), false)
 	router := newTestRouter(h)
 
 	body, _ := json.Marshal(PurchaseCommand{
