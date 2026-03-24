@@ -1788,13 +1788,8 @@ func TestPurchaseFlow_InsufficientFunds_CleanStatusReason(t *testing.T) {
 	}
 
 	reason := *updates[0].Reason
-	expected := "wallet debit rejected: insufficient funds"
+	expected := "insufficient funds"
 	if reason != expected {
 		t.Errorf("status_reason = %q, want %q", reason, expected)
-	}
-
-	// Explicitly verify the old duplicated wording is not present.
-	if reason == "insufficient funds: insufficient funds" {
-		t.Error("status_reason still contains the duplicated wording")
 	}
 }

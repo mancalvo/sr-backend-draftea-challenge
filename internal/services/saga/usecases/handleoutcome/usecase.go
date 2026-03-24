@@ -215,7 +215,7 @@ func (u *UseCase) failPurchaseDebit(ctx context.Context, env messaging.Envelope,
 		return nil
 	}
 
-	reason := fmt.Sprintf("wallet debit rejected: %s", payload.Reason)
+	reason := payload.Reason
 	if err := u.payments.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason, nil); err != nil {
 		logger.Error("failed to update transaction to failed", "error", err)
 		return fmt.Errorf("update transaction status to failed: %w", err)
@@ -256,7 +256,7 @@ func (u *UseCase) completePurchaseCompensation(ctx context.Context, env messagin
 		return nil
 	}
 
-	reason := "access grant conflicted, debit reversed"
+	reason := "already owned"
 	if err := u.payments.UpdateTransactionStatus(ctx, s.TransactionID, "compensated", &reason, nil); err != nil {
 		logger.Error("failed to update transaction to compensated", "error", err)
 		return fmt.Errorf("update transaction status to compensated: %w", err)
@@ -495,7 +495,7 @@ func (u *UseCase) failRefundRevoke(ctx context.Context, env messaging.Envelope, 
 		return nil
 	}
 
-	reason := fmt.Sprintf("access revoke rejected: %s", payload.Reason)
+	reason := payload.Reason
 	if err := u.payments.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason, nil); err != nil {
 		logger.Error("failed to update transaction to failed", "error", err)
 		return fmt.Errorf("update transaction status to failed: %w", err)
@@ -585,7 +585,7 @@ func (u *UseCase) failProviderCharge(ctx context.Context, env messaging.Envelope
 		return nil
 	}
 
-	reason := fmt.Sprintf("provider charge failed: %s", payload.Reason)
+	reason := fmt.Sprintf("deposit failed: %s", payload.Reason)
 	if err := u.payments.UpdateTransactionStatus(ctx, s.TransactionID, "failed", &reason, nil); err != nil {
 		logger.Error("failed to update transaction to failed", "error", err)
 		return fmt.Errorf("update transaction status to failed: %w", err)
