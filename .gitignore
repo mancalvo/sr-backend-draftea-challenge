@@ -6,6 +6,10 @@
 *.dylib
 /bin/
 
+# Go build cache
+.gocache/
+.gocache-review/
+
 # Test binary
 *.test
 
