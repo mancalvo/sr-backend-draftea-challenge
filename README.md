@@ -18,6 +18,39 @@ The code is organized as four application services plus infrastructure:
 - `postgres`
 - `traefik`
 
+## Architecture
+
+```
+                          +-----------+
+                          |  Traefik  |
+                          +-----+-----+
+              +----------+------+------+------------+
+              |          |             |             |
+      +-------v-------+  |  +---------v---+  +------v----------+
+      | saga-         |  |  | wallets     |  | catalog-access  |
+      | orchestrator  |  |  +------+------+  +--------+--------+
+      +----+--+-------+  |         |                  |
+           |  |           |         |                  |
+           |  |    +------v------+  |                  |
+           |  |    | payments    |  |                  |
+           |  |    +---+----+---+  |                  |
+           |  |        |    |      |                  |
+           |  |        | +--v---+  |                  |
+           |  |        | | Mock |  |                  |
+           |  |        | | Prov.|  |                  |
+           |  |        | +------+  |                  |
+           |  |        |           |                  |
+   +-------v--v--------v-----------v------------------v----+
+   |                      RabbitMQ                         |
+   |     commands exchange  <-->  outcomes exchange         |
+   +----------------------------+--------------------------+
+                                |
+   +----------------------------v--------------------------+
+   |               PostgreSQL  (one instance)              |
+   |  saga_orchestrator | payments | wallets | catalog     |
+   +-------------------------------------------------------+
+```
+
 ## Documentation
 
 The current implementation-first documentation lives in [docs](./docs/README.md).

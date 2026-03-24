@@ -10,3 +10,4 @@ db/seeds
 .env*
 Makefile
 .cz.toml
+ai_sessions
